@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+      - name: Unit tests（离线：不碰真机、不调模型）
+        run: ./scripts/test.sh
+
+  mib-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+      - name: MIB 编译流程可复现（pysmi → OID 索引）
+        run: |
+          cd backend && DETOPS_DATA_DIR=/tmp/detops python -c "
+          from app.core.db import init_db
+          from app.modules.mibs import models, service
+          init_db(); s = service.compile_all()
+          print('MIB', s['compiled'], '/', s['total'], 'OIDs', s['oid_count'])
+          assert s['compiled'] == s['total'] and s['oid_count'] > 0"
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build
+        run: cd frontend && npm ci && npm run build

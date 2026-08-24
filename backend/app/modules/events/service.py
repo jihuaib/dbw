@@ -1,0 +1,419 @@
+"""Syslog 服务器 + SNMP Trap 接收编排 + 事件上下文。
+
+设备侧只需两条既有配置命令（满足「设备侧少变动」）：
+    syslog server <host> [port]      → dev 模块，RFC3164 UDP 上报
+    snmp trap server <host> [port]   → snmp 模块，SNMPv2c trap
+
+Syslog 在 Python 里直接收（一个 UDP socket 的事）；trap 用 pysnmp 收
+（SNMPv2c，多端口，community 可配），OID 符号化解码查 mibs 模块编译出的索引。
+
+事件同时是**诊断输入**：归一化后的事件摘要送给 Agent 作上下文，其摘要哈希
+参与诊断指纹 —— 新事件出现 = 设备状态变了 = 理应重诊；事件集合不变则指纹
+不变，一致性不受影响。归一化去掉逐条时间戳、按内容去重计数分桶，避免
+「同一状态因为时间戳而变成不同输入」。
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import re
+import socket
+import socketserver
+import subprocess
+import threading
+from typing import Any, Dict, List, Optional, Tuple
+
+from ...core.canon import sha256_of
+from ...core.db import execute, loads, query, query_one
+from ..mibs import service as mibs
+from . import models  # noqa: F401  —— 注册建表语句
+
+SYSLOG_PORT_DEFAULT = 5514
+TRAP_PORT_DEFAULT = 1162
+MAX_EVENTS_KEPT = 5000
+CONTEXT_MAX_KINDS = 40          # 进模型的去重事件类型上限
+
+_LOCK = threading.Lock()
+_SYSLOG: Dict[int, "socketserver.UDPServer"] = {}
+_TRAP_ENGINE = None
+_TRAP_THREAD: Optional[threading.Thread] = None
+_TRAP_PORTS: List[int] = []
+COMMUNITY_KEY = "trap_communities"
+
+
+def _now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+# ── 源 IP → 设备名 ────────────────────────────────────────────────────
+def source_map() -> Dict[str, str]:
+    return {r["source_ip"]: r["device"] for r in query("SELECT * FROM event_source")}
+
+
+def set_source(source_ip: str, device: str, origin: str = "manual") -> None:
+    execute("INSERT OR REPLACE INTO event_source(source_ip, device, origin,"
+            " created_at) VALUES (?,?,?,?)", (source_ip, device, origin, _now()))
+
+
+def discover_sources() -> Dict[str, str]:
+    """尽力而为的自动映射。
+
+    1) 设备表 host 直接当源地址（远程真机场景天然成立）
+    2) 本机 docker 里 hostname 与设备名相同的容器，取其网络 IP
+       （scripts/lab.sh 场景：容器 --hostname SPINE1 与设备名一致）
+    """
+    from ..devices import service as device_service
+    devices = device_service.enabled_devices()
+    for d in devices:
+        host = d.get("host") or ""
+        if host and host not in ("127.0.0.1", "localhost"):
+            set_source(host, d["name"], "host-match")
+
+    try:
+        names = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10).stdout.split()
+        want = {d["name"] for d in devices}
+        for cname in names:
+            info = subprocess.run(
+                ["docker", "inspect", cname, "--format",
+                 "{{.Config.Hostname}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"],
+                capture_output=True, text=True, timeout=10).stdout.split()
+            if info and info[0] in want:
+                for ip in info[1:]:
+                    if ip:
+                        set_source(ip, info[0], "auto-docker")
+    except Exception:
+        pass
+    return source_map()
+
+
+def _device_ports(kind: str) -> Dict[int, str]:
+    """设备配置里的接收端口 → 设备名。端口是设备身份（NAT 改不了端口）。"""
+    col = "syslog_port" if kind == "syslog" else "trap_port"
+    return {int(r[col]): r["name"] for r in query(
+        "SELECT name, {0} FROM device WHERE enabled=1 AND {0} > 0".format(col))}
+
+
+def _device_of(source_ip: str, listen_port: int = 0, kind: str = "") -> str:
+    if listen_port:
+        hit = _device_ports(kind).get(listen_port)
+        if hit:
+            return hit
+    return source_map().get(source_ip, "")
+
+
+def listen_defaults() -> Dict[str, int]:
+    from ..settings import service as settings
+    try:
+        sp = int(settings.get("syslog_listen_port") or SYSLOG_PORT_DEFAULT)
+        tp = int(settings.get("trap_listen_port") or TRAP_PORT_DEFAULT)
+    except ValueError:
+        sp, tp = SYSLOG_PORT_DEFAULT, TRAP_PORT_DEFAULT
+    return {"syslog": sp, "trap": tp}
+
+
+def set_listen_defaults(syslog_port: int = 0, trap_port: int = 0) -> None:
+    from ..settings import service as settings
+    if syslog_port:
+        settings.put("syslog_listen_port", str(int(syslog_port)))
+    if trap_port:
+        settings.put("trap_listen_port", str(int(trap_port)))
+
+
+# ── 入库 ─────────────────────────────────────────────────────────────
+def store_event(kind: str, source_ip: str, *, severity: str = "", module: str = "",
+                event: str = "", message: str = "", trap_oid: str = "",
+                varbinds: Optional[List[Dict[str, str]]] = None,
+                raw: str = "", listen_port: int = 0) -> int:
+    eid = execute(
+        "INSERT INTO event(kind, source_ip, device, severity, module, event,"
+        " message, trap_oid, varbinds, raw, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (kind, source_ip, _device_of(source_ip, listen_port, kind),
+         severity, module, event,
+         message, trap_oid, json.dumps(varbinds or [], ensure_ascii=False),
+         raw[:2000], _now()))
+    execute("DELETE FROM event WHERE id <= (SELECT MAX(id) FROM event) - ?",
+            (MAX_EVENTS_KEPT,))
+    return eid
+
+
+def ingest_trap(payload: Dict[str, Any]) -> int:
+    """已解码的 trap 事件入库（varbinds 已符号化）。"""
+    return store_event(
+        "trap", payload.get("source_ip", ""),
+        listen_port=int(payload.get("listen_port") or 0),
+        event=payload.get("trap_name") or payload.get("trap_oid", ""),
+        message="; ".join("{0}={1}".format(v.get("name", v.get("oid", "")),
+                                           v.get("value", ""))
+                          for v in payload.get("varbinds", [])),
+        trap_oid=payload.get("trap_oid", ""),
+        varbinds=payload.get("varbinds"),
+        raw=json.dumps(payload, ensure_ascii=False))
+
+
+# ── Syslog 服务器（RFC3164：<PRI>时间戳 ident 模块/事件: 消息）────────
+SYSLOG_RE = re.compile(
+    r"^<(?P<pri>\d{1,3})>(?P<ts>\w{3}\s+\d+\s[\d:]{8})\s+"
+    r"(?P<ident>\S+)\s+(?P<module>[^/\s]+)/(?P<event>[^:\s]+):\s*(?P<msg>.*)$")
+SEVERITIES = ["emerg", "alert", "crit", "error", "warning", "notice", "info", "debug"]
+
+
+def parse_syslog(raw: str, source_ip: str) -> Dict[str, Any]:
+    m = SYSLOG_RE.match(raw.strip())
+    if not m:
+        return {"kind": "syslog", "source_ip": source_ip, "severity": "",
+                "module": "", "event": "", "message": raw.strip()[:500],
+                "raw": raw}
+    sev = SEVERITIES[int(m.group("pri")) % 8]
+    return {"kind": "syslog", "source_ip": source_ip, "severity": sev,
+            "module": m.group("module"), "event": m.group("event"),
+            "message": m.group("msg")[:500], "raw": raw}
+
+
+class _SyslogHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        data = self.request[0]
+        try:
+            text = data.decode("utf-8", "replace")
+        except Exception:
+            return
+        p = parse_syslog(text, self.client_address[0])
+        store_event("syslog", p["source_ip"], severity=p["severity"],
+                    module=p["module"], event=p["event"],
+                    message=p["message"], raw=p["raw"],
+                    listen_port=self.server.server_address[1])
+
+
+def _syslog_ports() -> List[int]:
+    """监听 = 默认端口 ∪ 各设备配置的 syslog 端口。"""
+    return sorted({listen_defaults()["syslog"], *_device_ports("syslog")})
+
+
+def start_syslog(ports: Optional[List[int]] = None) -> Dict[str, Any]:
+    global _SYSLOG
+    want = sorted(set(ports or _syslog_ports()))
+    with _LOCK:
+        stop_syslog()
+        for port in want:
+            server = socketserver.ThreadingUDPServer(("0.0.0.0", port),
+                                                     _SyslogHandler)
+            threading.Thread(target=server.serve_forever, daemon=True,
+                             name="syslog-{0}".format(port)).start()
+            _SYSLOG[port] = server
+    return {"running": True, "ports": want}
+
+
+def stop_syslog() -> None:
+    global _SYSLOG
+    for server in _SYSLOG.values():
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+    _SYSLOG = {}
+
+
+# ── Trap 接收（pysnmp，多端口，community 可配）────────────────────────
+SNMP_TRAP_OID = "1.3.6.1.6.3.1.1.4.1.0"
+SYSUPTIME_OID = "1.3.6.1.2.1.1.3.0"
+
+
+def communities() -> List[str]:
+    from ..settings import service as settings
+    raw = settings.get(COMMUNITY_KEY) or ""
+    return [c.strip() for c in raw.split(",") if c.strip()] or ["public"]
+
+
+def set_communities(values: List[str]) -> None:
+    from ..settings import service as settings
+    settings.put(COMMUNITY_KEY, ",".join(v.strip() for v in values if v.strip()))
+
+
+def _trap_ports() -> List[int]:
+    return sorted({listen_defaults()["trap"], *_device_ports("trap")})
+
+
+def _pretty(value: Any) -> str:
+    try:
+        return value.prettyPrint()
+    except Exception:
+        return str(value)
+
+
+def _on_notification(snmp_engine, state_ref, _ctx_eid, _ctx_name, var_binds, _cb):
+    try:
+        domain, address = snmp_engine.msgAndPduDsp.getTransportInfo(state_ref)
+        listen_port = _TRAP_PORTS[domain[-1]] if domain and _TRAP_PORTS else 0
+        source_ip = str(address[0]) if address else ""
+    except Exception:
+        listen_port, source_ip = 0, ""
+    trap_oid, uptime, varbinds = "", "", []
+    for name, val in var_binds:
+        oid = str(name)
+        if oid == SNMP_TRAP_OID:
+            trap_oid = str(val)
+            continue
+        if oid == SYSUPTIME_OID:
+            uptime = _pretty(val)
+            continue
+        varbinds.append({"oid": oid, "name": mibs.translate(oid), "value": _pretty(val)})
+    ingest_trap({"source_ip": source_ip, "listen_port": listen_port,
+                 "trap_oid": trap_oid,
+                 "trap_name": mibs.translate(trap_oid) if trap_oid else "",
+                 "uptime": uptime, "varbinds": varbinds})
+
+
+def start_trap(ports: Optional[List[int]] = None) -> Dict[str, Any]:
+    """pysnmp 接收器：一个引擎挂多个 UDP transport，transport 序号 ↔ 端口。"""
+    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS
+    from pysnmp.carrier.asyncore.dgram import udp
+    from pysnmp.entity import config, engine
+    from pysnmp.entity.rfc3413 import ntfrcv
+
+    want = sorted(set(ports or _trap_ports()))
+    with _LOCK:
+        if _TRAP_ENGINE is not None and _TRAP_PORTS == want:
+            return {"running": True, "ports": want}
+        stop_trap()
+        eng = engine.SnmpEngine()
+        for i, port in enumerate(want):
+            config.addTransport(eng, udp.domainName + (i,),
+                                udp.UdpTransport().openServerMode(("0.0.0.0", port)))
+        for i, comm in enumerate(communities()):
+            config.addV1System(eng, "detops-{0}".format(i), comm)
+        ntfrcv.NotificationReceiver(eng, _on_notification)
+        _TRAP_PORTS = want
+        _TRAP_ENGINE = eng
+        eng.transportDispatcher.jobStarted(1)
+
+        def _run():
+            try:
+                eng.transportDispatcher.runDispatcher()
+            except Exception:
+                pass
+
+        _TRAP_THREAD = threading.Thread(target=_run, daemon=True, name="trap-receiver")
+        _TRAP_THREAD.start()
+    return {"running": True, "ports": want}
+
+
+def stop_trap() -> None:
+    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS
+    if _TRAP_ENGINE is not None:
+        try:
+            _TRAP_ENGINE.transportDispatcher.jobFinished(1)
+            _TRAP_ENGINE.transportDispatcher.closeDispatcher()
+        except Exception:
+            pass
+    _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS = None, None, []
+
+
+def receivers_status() -> Dict[str, Any]:
+    return {
+        "syslog": {"running": bool(_SYSLOG), "ports": sorted(_SYSLOG)},
+        "trap": {"running": _TRAP_ENGINE is not None, "ports": _TRAP_PORTS,
+                 "communities": communities()},
+        "mib": mibs.status(),
+        "sources": source_map(),
+        "defaults": listen_defaults(),
+        "device_ports": {"syslog": _device_ports("syslog"),
+                         "trap": _device_ports("trap")},
+    }
+
+
+# ── 设备侧一键配置 ────────────────────────────────────────────────────
+def suggest_target_host() -> str:
+    """设备视角能到达的本机地址。
+
+    Docker Desktop（macOS/Windows）里网桥网关是虚拟机的地址，不是宿主机 ——
+    容器到宿主必须走 host.docker.internal；Linux 原生 docker 才是网关直达。
+    优先在容器里实测哪个能解析。"""
+    try:
+        names = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                               capture_output=True, text=True, timeout=10
+                               ).stdout.split()
+        probe = next((n for n in names if n.startswith("nn-")), "")
+        if probe:
+            r = subprocess.run(
+                ["docker", "exec", probe, "getent", "hosts",
+                 "host.docker.internal"],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return "host.docker.internal"
+        out = subprocess.run(
+            ["docker", "network", "inspect", "nn-mgmt", "--format",
+             "{{(index .IPAM.Config 0).Gateway}}"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+# ── 查询 ─────────────────────────────────────────────────────────────
+def list_events(kind: str = "", device: str = "", limit: int = 200) -> List[Dict[str, Any]]:
+    sql, params = "SELECT * FROM event", []
+    conds = []
+    if kind:
+        conds.append("kind=?")
+        params.append(kind)
+    if device:
+        conds.append("device=?")
+        params.append(device)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(limit, 1000)))
+    rows = query(sql, params)
+    for r in rows:
+        r["varbinds"] = loads(r["varbinds"], [])
+    return rows
+
+
+def clear_events() -> None:
+    execute("DELETE FROM event")
+
+
+# ── 诊断上下文（归一化，参与指纹）─────────────────────────────────────
+_NUM_RE = re.compile(r"\b\d+\b")
+
+
+def context_for(devices: List[str]) -> Tuple[str, str]:
+    """近期事件 → (归一化文本, 摘要哈希)。
+
+    只带内容不带时间戳，且**只记类型存在性、不记次数** —— 计数会在
+    反复 flap 中途从「1次」翻到「多次」，让检查途中的输入悄悄变化；
+    存在性只在**新类型事件**出现时变化，那正是「设备状态变了」的时刻。
+    """
+    # cli 审计在 SQL 层就排除 —— 它不但是观测回声，还会把状态事件
+    # 挤出「最近 N 条」窗口（一次诊断就下发几十条命令）。
+    rows = query("SELECT device, kind, severity, module, event, message"
+                 " FROM event WHERE module != 'cli'"
+                 " ORDER BY id DESC LIMIT 500")
+    want = set(devices)
+    kinds = set()
+    for r in rows:
+        if r["module"] == "cli":
+            # CLI 审计是「观测行为自身的回声」：诊断采集每下发一条命令都会
+            # 产生一条，它若进上下文，采集就会改变输入、指纹永不稳定。
+            continue
+        if r["device"] and want and r["device"] not in want:
+            continue
+        kinds.add((r["device"] or "?", r["kind"], r["severity"], r["module"],
+                   r["event"], _NUM_RE.sub("<n>", r["message"])[:160]))
+    if not kinds:
+        return "", ""
+    lines = ["- [{0}][{1}] {2} {3}/{4}: {5}".format(*key)
+             for key in sorted(kinds)]
+    text = "\n".join(lines[:CONTEXT_MAX_KINDS])
+    return text, sha256_of(text)

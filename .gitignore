@@ -1,0 +1,26 @@
+# 运行时数据：数据库（含 API Key、设备凭据）、模型调用缓存、上传的资料、MIB 索引
+backend/data/
+backend/**/*.db
+backend/**/*.db-*
+*.pid
+*.log
+
+# 设置备份（含 API Key 明文）—— 程序已改为写到 ~/.detops，这里双保险
+settings.bak.json
+.detops/
+
+# 环境与构建产物
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+frontend/.frontend.*
+
+# 本地文件
+.DS_Store
+*.docx
+~$*
+.env
+.env.*
