@@ -97,10 +97,16 @@ def _device_ports(kind: str) -> Dict[int, str]:
 
 
 def _device_of(source_ip: str, listen_port: int = 0, kind: str = "") -> str:
+    """归属顺序：设备独立端口（NAT/实验环境）→ 源 IP = 设备管理地址（真实设备的
+    常态：都用默认端口即可）→ 手动维护的源 IP 映射。"""
     if listen_port:
         hit = _device_ports(kind).get(listen_port)
         if hit:
             return hit
+    if source_ip:
+        row = query_one("SELECT name FROM device WHERE enabled=1 AND host=?", (source_ip,))
+        if row:
+            return row["name"]
     return source_map().get(source_ip, "")
 
 
@@ -424,6 +430,16 @@ def _candidate_hosts() -> List[str]:
 _PROBED_HOST = ""
 
 
+def _lab_network_present() -> bool:
+    """仅当本机 docker 里有实验环境的 nn-mgmt 网络时才认为是实验环境。"""
+    try:
+        r = subprocess.run(["docker", "network", "inspect", "nn-mgmt"],
+                           capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def suggest_target_host(force: bool = False) -> str:
     """实测选址，不按平台猜。
 
@@ -433,6 +449,10 @@ def suggest_target_host(force: bool = False) -> str:
     结果缓存；docker 不可用时退回宿主机局域网 IP。"""
     global _PROBED_HOST
     if _PROBED_HOST and not force:
+        return _PROBED_HOST
+    if not _lab_network_present():
+        # 真实设备：设备直接把日志/trap 发到本服务器的 IP，没有容器那层，不探测
+        _PROBED_HOST = _lan_ip()
         return _PROBED_HOST
     cands = _candidate_hosts()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

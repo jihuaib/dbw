@@ -100,3 +100,13 @@ def test_parse_syslog_rfc5424():
     assert p["severity"] == "notice"
     assert p["module"] == "if" and p["event"] == "proto-down"
     assert p["message"].startswith("interface=Eth1")
+
+
+def test_real_device_attribution_by_source_ip():
+    """真实设备：不配独立端口，事件源 IP 就是管理地址，直接归属。"""
+    execute("INSERT OR REPLACE INTO device(name, role, protocol, host, port, enabled,"
+            " created_at) VALUES ('CORE-1','CORE','ssh','10.1.1.1',22,1,'t')")
+    assert E._device_of("10.1.1.1", 5514, "syslog") == "CORE-1"
+    assert E._device_of("10.1.1.1", 0, "trap") == "CORE-1"
+    assert E._device_of("10.9.9.9", 5514, "syslog") == ""
+    execute("DELETE FROM device WHERE name='CORE-1'")
