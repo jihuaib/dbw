@@ -4,6 +4,7 @@
 #   ./scripts/test.sh live     # + 真机集成（需后端 :8099 + CNetNexus 容器 + API key）
 #   ./scripts/test.sh e2e      # + 前端 Playwright 端到端
 set -e
+set -o pipefail   # 管道里 pytest 失败也要让脚本失败
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY="python"      # CI 里没有 venv，用已装好依赖的系统 python

@@ -104,9 +104,10 @@ def _device_of(source_ip: str, listen_port: int = 0, kind: str = "") -> str:
         if hit:
             return hit
     if source_ip:
-        row = query_one("SELECT name FROM device WHERE enabled=1 AND host=?", (source_ip,))
-        if row:
-            return row["name"]
+        # 只有唯一匹配才认：实验环境里 4 台设备管理地址都是 127.0.0.1，按源 IP 会张冠李戴
+        rows = query("SELECT name FROM device WHERE enabled=1 AND host=?", (source_ip,))
+        if len(rows) == 1:
+            return rows[0]["name"]
     return source_map().get(source_ip, "")
 
 

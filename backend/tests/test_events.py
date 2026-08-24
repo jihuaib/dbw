@@ -23,14 +23,17 @@ def test_port_attribution_beats_source_ip():
     execute("INSERT OR REPLACE INTO device(name, role, protocol, host, port, enabled,"
             " syslog_port, trap_port, created_at)"
             " VALUES ('LEAF9','LEAF','telnet','127.0.0.1',23,1,6001,7001,'t')")
+    execute("INSERT OR REPLACE INTO device(name, role, protocol, host, port, enabled,"
+            " created_at) VALUES ('LEAF8','LEAF','telnet','127.0.0.1',24,1,'t')")
     assert E._device_of("127.0.0.1", 6001, "syslog") == "LEAF9"
+    # 源 IP 对应多台设备（NAT/同宿主机）→ 不能按源 IP 猜
     assert E._device_of("127.0.0.1", 6002, "syslog") == ""
     # trap 与 syslog 的端口空间独立
     assert E._device_of("127.0.0.1", 6001, "trap") == ""
     assert E._device_of("127.0.0.1", 7001, "trap") == "LEAF9"
     # 服务器监听 = 默认端口 ∪ 设备端口
     assert 6001 in E._syslog_ports() and 7001 in E._trap_ports()
-    execute("DELETE FROM device WHERE name='LEAF9'")
+    execute("DELETE FROM device WHERE name IN ('LEAF9','LEAF8')")
 
 
 def test_context_dedupes_and_is_deterministic():
