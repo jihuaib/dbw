@@ -232,6 +232,8 @@ def call(path, payload=None, method=None):
         return json.loads(r.read().decode())
 def sh(cmd):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True); return (r.stdout + r.stderr).strip()
+def port_default(rs):
+    return rs["syslog"]["ports"][0]
 
 print("== 1. 后台接收器 ==")
 rs = call("/api/events/receivers")
@@ -254,23 +256,40 @@ for d in devs:
     except Exception as exc:
         print("  %-7s 读取失败: %s" % (d["name"], exc))
 
-print("== 3. 容器 → 宿主 UDP 通路（从 nn-mgmt 网段发一条测试 syslog 到 %s:%s）==" % (host, rs["syslog"]["ports"][0]))
+print("== 3. 谁在监听 5514 / 1162（宿主机）==")
+print("  " + (sh("ss -lunp 2>/dev/null | grep -E ':(5514|1162|%s)\\b' || lsof -nP -iUDP:5514 -iUDP:1162 2>/dev/null" % port_default(rs)) or "（看不到监听 —— ss/lsof 不可用或端口无人监听）").replace("\n", "\n  "))
+print("  ufw:", sh("sudo -n ufw status 2>/dev/null | head -1") or "（未装或需 sudo）")
+
+def send_and_wait(via, target, port, label):
+    marker = "detops-check-%s-%d" % (label, int(time.time() * 1000) % 100000)
+    msg = "<190>Aug 25 10:00:00 checker lab/check-report: %s" % marker
+    if via == "local":
+        sh("echo '%s' | nc -u -w1 %s %d" % (msg, target, port))
+    else:
+        sh("docker run --rm --network nn-mgmt alpine sh -c \"echo '%s' | nc -u -w1 %s %d\"" % (msg, target, port))
+    time.sleep(1.5)
+    hit = [e for e in call("/api/events?kind=syslog&limit=100") if marker in e.get("message", "")]
+    return bool(hit)
+
 port = rs["syslog"]["ports"][0]
-marker = "detops-check-%d" % int(time.time())
-msg = "<190>Aug 25 10:00:00 checker lab/check-report: %s" % marker
-r = sh("docker run --rm --network nn-mgmt alpine sh -c \"echo '%s' | nc -u -w1 %s %d\"" % (msg, host, port))
-if r: print("  发送输出:", r[:200])
-time.sleep(2)
-hit = [e for e in call("/api/events?kind=syslog&limit=50") if marker in e.get("message", "")]
-if hit:
-    print("  ✓ 后台收到了测试报文（源 %s，归属 %s）—— 网络通路正常" % (hit[0]["source_ip"], hit[0]["device"] or "未映射"))
-    print("  → 若设备事件仍不到，问题在设备侧：核对第 2 步里设备配置的目标地址是否就是 %s" % host)
+print("== 4. UDP 通路矩阵（目标端口 %d）==" % port)
+ok_local = send_and_wait("local", "127.0.0.1", port, "local")
+print("  本机回环 127.0.0.1:%d → %s" % (port, "✓ 后台能收" if ok_local else "✗ 后台收不到（后台监听/解析有问题，与容器无关）"))
+lan = sh("hostname -I 2>/dev/null | awk '{print $1}'") or ""
+results = {}
+for cand in [c for c in [gw, lan, "host.docker.internal"] if c]:
+    results[cand] = send_and_wait("container", cand, port, cand.replace(".", "-"))
+    print("  容器 → %-22s:%d → %s" % (cand, port, "✓" if results[cand] else "✗"))
+good = [c for c, ok in results.items() if ok]
+if good:
+    print("  → 能通的地址: %s。设备当前配置的是 %s；若不一致，运行 ./scripts/lab.sh register 重新下发" % (good, host))
+    if host not in good:
+        print("    （实测选址与本次矩阵不一致，说明该地址对高端口通、对 %d 不通：端口级过滤）" % port)
+elif ok_local:
+    print("  → 本机能收、容器全不通：宿主机防火墙拦了来自容器/虚拟机网段的 UDP %d。放行后重试：" % port)
+    print("     sudo ufw allow proto udp to any port 5514:5530,1162:1180")
 else:
-    print("  ✗ 后台没收到 —— 容器到宿主机的 UDP %d 被挡：" % port)
-    print("    · 防火墙（Ubuntu ufw）：sudo ufw allow in on $(docker network inspect nn-mgmt --format '{{.Id}}' | cut -c1-12 | sed 's/^/br-/') proto udp")
-    print("      或直接：sudo ufw allow proto udp from 172.16.0.0/12 to any port 5514:5530,1162:1180")
-    print("    · 或 iptables 的 INPUT 链是否 DROP 了来自 br-* 的 UDP：sudo iptables -L INPUT -n | head")
-    print("    · 确认后台监听 0.0.0.0（./scripts/backend.sh status），而非只在 127.0.0.1")
+    print("  → 连本机回环都收不到：检查后台日志 ./scripts/backend.sh logs，以及是否有别的进程占了 %d" % port)
 PYEOF
   ;;
 *) echo "用法: $0 {up|down|fault|heal|fault-mtu|heal-mtu|fault-multi|heal-multi|fault-fabric|heal-fabric|register|check-report}"; exit 1 ;;
