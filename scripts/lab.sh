@@ -11,6 +11,7 @@
 #   ./scripts/lab.sh fault-fabric  跨设备多异常表项（100% 判据环境，三台设备各一处）
 #   ./scripts/lab.sh heal-fabric   恢复
 #   ./scripts/lab.sh register [后台地址]   把这 4 台设备注册到后台（含上报端口并下发），默认 http://127.0.0.1:8099
+#   ./scripts/lab.sh check-report [后台地址]  自检 syslog/trap 上报链路：设备配置 → 容器到宿主 UDP → 后台入库
 set -e
 # 镜像按本机架构自动选择；本地没有就从 CNetNexus 的 GitHub Release 下载并 docker load。
 NN_VERSION="${NN_VERSION:-1.0.0}"
@@ -217,5 +218,60 @@ except urllib.error.HTTPError as exc:
 print("下一步：设备页 → 探测 → 实测标定 → 一键发现拓扑（或直接在诊断页提问）")
 PYEOF
   ;;
-*) echo "用法: $0 {up|down|fault|heal|fault-mtu|heal-mtu|fault-multi|heal-multi|fault-fabric|heal-fabric|register}"; exit 1 ;;
+check-report)
+  API="${2:-http://127.0.0.1:8099}"
+  API="$API" python3 - << 'PYEOF'
+import json, os, subprocess, sys, time, urllib.request
+api = os.environ["API"].rstrip("/")
+def call(path, payload=None, method=None):
+    req = urllib.request.Request(api + path,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Content-Type": "application/json"},
+        method=method or ("POST" if payload is not None else "GET"))
+    with urllib.request.urlopen(req, timeout=90) as r:
+        return json.loads(r.read().decode())
+def sh(cmd):
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True); return (r.stdout + r.stderr).strip()
+
+print("== 1. 后台接收器 ==")
+rs = call("/api/events/receivers")
+print("  syslog 监听:", rs["syslog"]["ports"], "| trap 监听:", rs["trap"]["ports"], "| trap 错误:", rs["trap"].get("error") or "无")
+host = call("/api/events/suggest-host")["host"]
+print("  后台建议的上报目标:", host)
+gw = sh("docker network inspect nn-mgmt --format '{{(index .IPAM.Config 0).Gateway}}'")
+print("  nn-mgmt 网桥网关:", gw)
+print("  容器内解析 host.docker.internal:", sh("docker exec nn-leaf1 getent hosts host.docker.internal") or "（不解析 —— Linux 原生 Docker 正常现象，应使用网关地址）")
+
+print("== 2. 设备上配置了什么 ==")
+devs = call("/api/devices")
+for d in devs:
+    try:
+        out = call("/api/devices/%d/test" % d["id"], {"command": "show current-configuration"})
+        text = out.get("output") or out.get("text") or json.dumps(out)
+        lines = [l.strip() for l in text.split("\n") if "syslog server" in l or "snmp trap server" in l]
+        print("  %-7s 配置: %s | 后台记录: report_host=%s syslog=%s trap=%s" % (
+            d["name"], "; ".join(lines) or "（无上报配置！）", d.get("report_host"), d.get("syslog_port"), d.get("trap_port")))
+    except Exception as exc:
+        print("  %-7s 读取失败: %s" % (d["name"], exc))
+
+print("== 3. 容器 → 宿主 UDP 通路（从 nn-mgmt 网段发一条测试 syslog 到 %s:%s）==" % (host, rs["syslog"]["ports"][0]))
+port = rs["syslog"]["ports"][0]
+marker = "detops-check-%d" % int(time.time())
+msg = "<190>Aug 25 10:00:00 checker lab/check-report: %s" % marker
+r = sh("docker run --rm --network nn-mgmt alpine sh -c \"echo '%s' | nc -u -w1 %s %d\"" % (msg, host, port))
+if r: print("  发送输出:", r[:200])
+time.sleep(2)
+hit = [e for e in call("/api/events?kind=syslog&limit=50") if marker in e.get("message", "")]
+if hit:
+    print("  ✓ 后台收到了测试报文（源 %s，归属 %s）—— 网络通路正常" % (hit[0]["source_ip"], hit[0]["device"] or "未映射"))
+    print("  → 若设备事件仍不到，问题在设备侧：核对第 2 步里设备配置的目标地址是否就是 %s" % host)
+else:
+    print("  ✗ 后台没收到 —— 容器到宿主机的 UDP %d 被挡：" % port)
+    print("    · 防火墙（Ubuntu ufw）：sudo ufw allow in on $(docker network inspect nn-mgmt --format '{{.Id}}' | cut -c1-12 | sed 's/^/br-/') proto udp")
+    print("      或直接：sudo ufw allow proto udp from 172.16.0.0/12 to any port 5514:5530,1162:1180")
+    print("    · 或 iptables 的 INPUT 链是否 DROP 了来自 br-* 的 UDP：sudo iptables -L INPUT -n | head")
+    print("    · 确认后台监听 0.0.0.0（./scripts/backend.sh status），而非只在 127.0.0.1")
+PYEOF
+  ;;
+*) echo "用法: $0 {up|down|fault|heal|fault-mtu|heal-mtu|fault-multi|heal-multi|fault-fabric|heal-fabric|register|check-report}"; exit 1 ;;
 esac
