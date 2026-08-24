@@ -56,8 +56,9 @@ def stop() -> Dict[str, Any]:
 
 
 @router.get("/suggest-host")
-def suggest_host() -> Dict[str, str]:
-    return {"host": service.suggest_target_host()}
+def suggest_host(force: bool = False) -> Dict[str, str]:
+    """实测哪个地址能从设备网段到达宿主机（结果缓存，force=1 重测）。"""
+    return {"host": service.suggest_target_host(force=force)}
 
 
 class SourceIn(BaseModel):

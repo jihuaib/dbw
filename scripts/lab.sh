@@ -186,7 +186,7 @@ except Exception as exc:
     sys.exit("后台不可达 %s：%s（先 ./scripts/start.sh）" % (api, exc))
 prof = next((p for p in opts["vendor_profiles"] if p["id"] == "cnetnexus"), None) \
     or sys.exit("vendors.json 里没有 cnetnexus 预设")
-host = call("/api/events/suggest-host")["host"]
+host = call("/api/events/suggest-host?force=1")["host"]
 existing = {d["name"]: d for d in call("/api/devices")}
 plan = [("SPINE1", "SPINE", 2301), ("LEAF1", "LEAF", 2302),
         ("LEAF2", "LEAF", 2303), ("LEAF3", "LEAF", 2304)]
@@ -236,8 +236,8 @@ def sh(cmd):
 print("== 1. 后台接收器 ==")
 rs = call("/api/events/receivers")
 print("  syslog 监听:", rs["syslog"]["ports"], "| trap 监听:", rs["trap"]["ports"], "| trap 错误:", rs["trap"].get("error") or "无")
-host = call("/api/events/suggest-host")["host"]
-print("  后台建议的上报目标:", host)
+host = call("/api/events/suggest-host?force=1")["host"]
+print("  后台实测的上报目标（探测包能到宿主机的地址）:", host)
 gw = sh("docker network inspect nn-mgmt --format '{{(index .IPAM.Config 0).Gateway}}'")
 print("  nn-mgmt 网桥网关:", gw)
 print("  容器内解析 host.docker.internal:", sh("docker exec nn-leaf1 getent hosts host.docker.internal") or "（不解析 —— Linux 原生 Docker 正常现象，应使用网关地址）")

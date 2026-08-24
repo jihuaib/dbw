@@ -21,6 +21,7 @@ import socket
 import socketserver
 import subprocess
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.canon import sha256_of
@@ -392,32 +393,7 @@ def receivers_status() -> Dict[str, Any]:
 
 
 # ── 设备侧一键配置 ────────────────────────────────────────────────────
-def suggest_target_host() -> str:
-    """设备视角能到达的本机地址。
-
-    Docker Desktop（macOS/Windows）里网桥网关是虚拟机的地址，不是宿主机 ——
-    容器到宿主必须走 host.docker.internal；Linux 原生 docker 才是网关直达。
-    优先在容器里实测哪个能解析。"""
-    try:
-        names = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
-                               capture_output=True, text=True, timeout=10
-                               ).stdout.split()
-        probe = next((n for n in names if n.startswith("nn-")), "")
-        if probe:
-            r = subprocess.run(
-                ["docker", "exec", probe, "getent", "hosts",
-                 "host.docker.internal"],
-                capture_output=True, text=True, timeout=10)
-            if r.returncode == 0 and r.stdout.strip():
-                return "host.docker.internal"
-        out = subprocess.run(
-            ["docker", "network", "inspect", "nn-mgmt", "--format",
-             "{{(index .IPAM.Config 0).Gateway}}"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-        if out:
-            return out
-    except Exception:
-        pass
+def _lan_ip() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -426,6 +402,68 @@ def suggest_target_host() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _candidate_hosts() -> List[str]:
+    """设备（容器）视角可能到达宿主机的地址，按经验顺序。"""
+    cands: List[str] = []
+    try:
+        gw = subprocess.run(
+            ["docker", "network", "inspect", "nn-mgmt", "--format",
+             "{{(index .IPAM.Config 0).Gateway}}"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        if gw:
+            cands.append(gw)
+    except Exception:
+        pass
+    cands.append(_lan_ip())
+    cands.append("host.docker.internal")
+    return [c for i, c in enumerate(cands) if c and c not in cands[:i]]
+
+
+_PROBED_HOST = ""
+
+
+def suggest_target_host(force: bool = False) -> str:
+    """实测选址，不按平台猜。
+
+    原生 Docker 里网桥网关直达宿主机；Docker Desktop（Mac / Linux）容器在虚拟机里，
+    网关是虚拟机的，host.docker.internal 的 UDP 转发又因版本而异。所以：后台临时
+    开一个 UDP 端口，从设备所在网段起容器向每个候选地址发探测包，谁先到用谁。
+    结果缓存；docker 不可用时退回宿主机局域网 IP。"""
+    global _PROBED_HOST
+    if _PROBED_HOST and not force:
+        return _PROBED_HOST
+    cands = _candidate_hosts()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("0.0.0.0", 0))
+        port = sock.getsockname()[1]
+        sock.settimeout(0.2)
+        for cand in cands:
+            token = "detops-probe-{0}".format(cand)
+            try:
+                subprocess.run(
+                    ["docker", "run", "--rm", "--network", "nn-mgmt", "alpine", "sh", "-c",
+                     "echo '{0}' | nc -u -w1 {1} {2}".format(token, cand, port)],
+                    capture_output=True, text=True, timeout=25)
+            except Exception:
+                continue
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                try:
+                    data, _addr = sock.recvfrom(256)
+                except socket.timeout:
+                    continue
+                if token.encode() in data:
+                    _PROBED_HOST = cand
+                    return cand
+    except Exception:
+        pass
+    finally:
+        sock.close()
+    _PROBED_HOST = ""
+    return _lan_ip()
 
 
 # ── 查询 ─────────────────────────────────────────────────────────────
