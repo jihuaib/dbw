@@ -12,7 +12,12 @@ ensure_venv() {
   if [ ! -x "$PY" ]; then
     echo "创建虚拟环境并安装依赖…"
     python3 -m venv "$ROOT/.venv"
-    "$ROOT/.venv/bin/pip" install -q -r "$ROOT/backend/requirements.txt"
+  fi
+  # requirements.txt 比上次安装新（git pull 之后）就重装，避免跑着旧依赖
+  local stamp="$ROOT/.venv/.requirements.stamp"
+  if [ ! -f "$stamp" ] || [ "$ROOT/backend/requirements.txt" -nt "$stamp" ]; then
+    echo "安装/更新后端依赖…"
+    "$ROOT/.venv/bin/pip" install -q -r "$ROOT/backend/requirements.txt" && touch "$stamp"
   fi
 }
 

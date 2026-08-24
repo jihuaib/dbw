@@ -206,8 +206,14 @@ for i, (name, role, port) in enumerate(plan, 1):
     except Exception as exc:
         rep = "上报下发失败: %s" % exc
     print("  %s %-7s telnet 127.0.0.1:%d  syslog %d / trap %d  %s" % (act, name, port, 5514 + i, 1162 + i, rep))
-call("/api/events/receivers/start", {})
-print("接收器已按设备端口重启。上报目标地址: %s" % host)
+try:
+    st = call("/api/events/receivers/start", {})
+    print("接收器已按设备端口重启：syslog %s / trap %s。上报目标地址: %s" % (
+        st["syslog"]["ports"], st["trap"]["ports"], host))
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode("utf-8", "replace")[:300]
+    print("接收器重启失败（HTTP %d）: %s" % (exc.code, body))
+    print("  → 多半是后台还在跑旧代码/旧依赖：./scripts/backend.sh restart 后再 ./scripts/lab.sh register；日志看 ./scripts/backend.sh logs")
 print("下一步：设备页 → 探测 → 实测标定 → 一键发现拓扑（或直接在诊断页提问）")
 PYEOF
   ;;

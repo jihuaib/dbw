@@ -39,8 +39,12 @@ def start(body: ReceiverIn) -> Dict[str, Any]:
     service.set_listen_defaults(body.syslog_port, body.trap_port)
     if body.communities:
         service.set_communities(body.communities)
-    service.start_syslog()
-    service.start_trap()
+    try:
+        service.start_syslog()
+        service.start_trap()
+    except Exception as exc:
+        raise HTTPException(502, "接收器启动失败: {0}: {1}".format(
+            type(exc).__name__, exc)[:400])
     return service.receivers_status()
 
 
