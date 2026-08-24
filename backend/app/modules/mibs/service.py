@@ -127,8 +127,12 @@ def compile_all() -> Dict[str, Any]:
             if objs:
                 entry["objects"] = [o.get("object", "") for o in objs
                                     if isinstance(o, dict)]
-            # 用户覆盖优先：同一 OID 后写的（bundled 在后）不覆盖已有
-            if oid not in oids or s["origin"] == "user":
+            # 同一 OID 多个模块定义时按分数取胜：用户导入 > 自带；同级里 SMIv2 > SMIv1
+            # （RFC1155/RFC1213 这类老模块与 IF-MIB 定义同一批 OID，解码要认新的）
+            entry["_rank"] = (2 if s["origin"] == "user" else 0) \
+                + (0 if s["module"].upper().startswith("RFC") else 1)
+            prev = oids.get(oid)
+            if prev is None or entry["_rank"] > prev.get("_rank", -1):
                 oids[oid] = entry
             count += 1
         per_module.append({"module": s["module"], "file": s["file"],
@@ -140,6 +144,8 @@ def compile_all() -> Dict[str, Any]:
                "total": len(per_module), "oid_count": len(oids),
                "compiled_at": _now(), "modules": per_module}
 
+    for e in oids.values():
+        e.pop("_rank", None)
     os.makedirs(str(INDEX_FILE.parent), exist_ok=True)
     with open(str(INDEX_FILE), "w", encoding="utf-8") as fh:
         json.dump({"summary": summary, "oids": oids}, fh, ensure_ascii=False)

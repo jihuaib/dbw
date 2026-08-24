@@ -272,7 +272,9 @@ def _pretty(value: Any) -> str:
 
 def _on_notification(snmp_engine, state_ref, _ctx_eid, _ctx_name, var_binds, _cb):
     try:
-        domain, address = snmp_engine.msgAndPduDsp.getTransportInfo(state_ref)
+        md = getattr(snmp_engine, "message_dispatcher", None) or snmp_engine.msgAndPduDsp
+        get_info = getattr(md, "get_transport_info", None) or md.getTransportInfo
+        domain, address = get_info(state_ref)
         listen_port = _TRAP_PORTS[domain[-1]] if domain and _TRAP_PORTS else 0
         source_ip = str(address[0]) if address else ""
     except Exception:
@@ -293,56 +295,94 @@ def _on_notification(snmp_engine, state_ref, _ctx_eid, _ctx_name, var_binds, _cb
                  "uptime": uptime, "varbinds": varbinds})
 
 
+_TRAP_LOOP = None
+_TRAP_ERROR = ""
+
+
 def start_trap(ports: Optional[List[int]] = None) -> Dict[str, Any]:
-    """pysnmp 接收器：一个引擎挂多个 UDP transport，transport 序号 ↔ 端口。"""
-    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS
-    from pysnmp.carrier.asyncore.dgram import udp
-    from pysnmp.entity import config, engine
-    from pysnmp.entity.rfc3413 import ntfrcv
+    """pysnmp 7（asyncio）接收器：专用线程里跑自己的事件循环，
+    一个引擎挂多个 UDP transport，transport 序号 ↔ 端口。"""
+    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS, _TRAP_LOOP, _TRAP_ERROR
+    import asyncio
 
     want = sorted(set(ports or _trap_ports()))
     with _LOCK:
         if _TRAP_ENGINE is not None and _TRAP_PORTS == want:
             return {"running": True, "ports": want}
         stop_trap()
-        eng = engine.SnmpEngine()
-        for i, port in enumerate(want):
-            config.addTransport(eng, udp.domainName + (i,),
-                                udp.UdpTransport().openServerMode(("0.0.0.0", port)))
-        for i, comm in enumerate(communities()):
-            config.addV1System(eng, "detops-{0}".format(i), comm)
-        ntfrcv.NotificationReceiver(eng, _on_notification)
-        _TRAP_PORTS = want
-        _TRAP_ENGINE = eng
-        eng.transportDispatcher.jobStarted(1)
+        ready = threading.Event()
+        errors: List[str] = []
 
-        def _run():
+        def _run() -> None:
+            global _TRAP_ENGINE, _TRAP_LOOP
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                eng.transportDispatcher.runDispatcher()
+                from pysnmp.carrier.asyncio.dgram import udp
+                from pysnmp.entity import config, engine
+                from pysnmp.entity.rfc3413 import ntfrcv
+                eng = engine.SnmpEngine()
+                for i, port in enumerate(want):
+                    config.add_transport(
+                        eng, udp.DOMAIN_NAME + (i,),
+                        udp.UdpTransport().open_server_mode(("0.0.0.0", port)))
+                for i, comm in enumerate(communities()):
+                    config.add_v1_system(eng, "detops-{0}".format(i), comm)
+                ntfrcv.NotificationReceiver(eng, _on_notification)
+                _TRAP_ENGINE, _TRAP_LOOP = eng, loop
+            except Exception as exc:
+                errors.append("{0}: {1}".format(type(exc).__name__, exc))
+                ready.set()
+                return
+            ready.set()
+            try:
+                eng.transport_dispatcher.job_started(1)
+                eng.transport_dispatcher.run_dispatcher()
             except Exception:
                 pass
+            finally:
+                try:
+                    eng.transport_dispatcher.close_dispatcher()
+                except Exception:
+                    pass
 
+        _TRAP_PORTS = want
         _TRAP_THREAD = threading.Thread(target=_run, daemon=True, name="trap-receiver")
         _TRAP_THREAD.start()
+        ready.wait(10)
+        if errors:
+            _TRAP_ENGINE, _TRAP_LOOP, _TRAP_PORTS = None, None, []
+            _TRAP_ERROR = errors[0]
+            raise RuntimeError("trap 接收器启动失败: " + errors[0])
+        _TRAP_ERROR = ""
     return {"running": True, "ports": want}
 
 
 def stop_trap() -> None:
-    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS
-    if _TRAP_ENGINE is not None:
+    global _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS, _TRAP_LOOP
+    eng, loop, thread = _TRAP_ENGINE, _TRAP_LOOP, _TRAP_THREAD
+    _TRAP_ENGINE, _TRAP_LOOP, _TRAP_PORTS, _TRAP_THREAD = None, None, [], None
+    if eng is not None and loop is not None:
+        def _shutdown():
+            try:
+                eng.transport_dispatcher.job_finished(1)
+                eng.transport_dispatcher.close_dispatcher()
+            except Exception:
+                pass
+            loop.stop()
         try:
-            _TRAP_ENGINE.transportDispatcher.jobFinished(1)
-            _TRAP_ENGINE.transportDispatcher.closeDispatcher()
+            loop.call_soon_threadsafe(_shutdown)
         except Exception:
             pass
-    _TRAP_ENGINE, _TRAP_THREAD, _TRAP_PORTS = None, None, []
+    if thread is not None:
+        thread.join(timeout=3)
 
 
 def receivers_status() -> Dict[str, Any]:
     return {
         "syslog": {"running": bool(_SYSLOG), "ports": sorted(_SYSLOG)},
         "trap": {"running": _TRAP_ENGINE is not None, "ports": _TRAP_PORTS,
-                 "communities": communities()},
+                 "communities": communities(), "error": _TRAP_ERROR},
         "mib": mibs.status(),
         "sources": source_map(),
         "defaults": listen_defaults(),

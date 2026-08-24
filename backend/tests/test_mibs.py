@@ -67,3 +67,8 @@ def test_search_ranks_exact_name_first(compiled):
     hits = M.search("linkDown")
     assert hits[0]["name"] == "linkDown"          # 精确名在最前，不被「包含」命中挤掉
     assert any(h["name"] == "linkUp" for h in M.search("link"))
+
+
+def test_translate_prefers_smiv2_over_legacy(compiled):
+    # ifIndex 同时在 RFC1213-MIB（SMIv1）与 IF-MIB（SMIv2）里定义，解码要认 IF-MIB
+    assert M.translate("1.3.6.1.2.1.2.2.1.1.12") == "IF-MIB::ifIndex.12"

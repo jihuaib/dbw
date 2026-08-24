@@ -12,5 +12,5 @@ langchain-openai
 langchain-anthropic
 langchain-community
 pysmi==0.3.4
-pysnmp==4.4.12
-pyasn1==0.4.8
+pysnmp>=7.1,<8      # asyncio 版，Python 3.9~3.13 通用（4.4 依赖已移除的 asyncore/imp）
+pyasn1>=0.4.8,<0.7
