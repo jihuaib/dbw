@@ -23,38 +23,25 @@ DEFAULT_LLDP_CMDS = ["show lldp neighbors", "display lldp neighbor-information l
                      "show lldp neighbor brief"]
 
 # 厂商预设：填好接入方式与关键命令，加设备时少填几项、少踩坑
-VENDOR_PROFILES = [
-    {
-        "id": "cnetnexus", "label": "CNetNexus",
-        "protocol": "telnet", "port": 23,
-        "pager_cmd": "terminal length 0", "lldp_cmd": "show lldp neighbors",
-        "syslog_cmd": "syslog server {host} port {port}",
-        "trap_cmd": "snmp trap server {host} port {port}",
-        "note": "CNetNexus 当前只实现 telnet（SSH 是占位命令）；"
-                "设备侧需先 telnet server enable + transport input telnet",
-    },
-    {
-        "id": "h3c", "label": "H3C Comware",
-        "protocol": "ssh", "port": 22,
-        "pager_cmd": "screen-length disable",
-        "lldp_cmd": "display lldp neighbor-information list",
-        "syslog_cmd": "info-center loghost {host} port {port}",
-        "trap_cmd": "snmp-agent target-host trap address udp-domain {host} udp-port {port} params securityname public",
-        "note": "",
-    },
-    {
-        "id": "cisco", "label": "Cisco IOS",
-        "protocol": "ssh", "port": 22,
-        "pager_cmd": "terminal length 0", "lldp_cmd": "show lldp neighbors",
-        "syslog_cmd": "logging host {host} transport udp port {port}",
-        "trap_cmd": "snmp-server host {host} version 2c public udp-port {port}",
-        "note": "",
-    },
-    {
-        "id": "generic", "label": "其它 / 手动填写",
-        "protocol": "ssh", "port": 22, "pager_cmd": "", "lldp_cmd": "",
-        "syslog_cmd": "", "trap_cmd": "", "note": "",
-    },
+# 厂商预设是数据不是代码：backend/vendors.json（DETOPS_VENDORS 可指向别的文件）。
+# 接入新厂商 = 往 JSON 里加一条：接入协议/端口、关分屏与 LLDP 命令、
+# syslog / trap 上报命令模板（{host} {port} 占位）。第一条是页面默认选中项。
+def _load_vendor_profiles() -> List[Dict[str, Any]]:
+    import json as _json
+    import os as _os
+    from ...core.config import BASE_DIR
+    path = _os.environ.get("DETOPS_VENDORS") or str(BASE_DIR / "vendors.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = _json.load(fh)
+        return data if isinstance(data, list) and data else []
+    except (OSError, ValueError):
+        return []
+
+
+VENDOR_PROFILES: List[Dict[str, Any]] = _load_vendor_profiles() or [
+    {"id": "generic", "label": "手动填写", "protocol": "ssh", "port": 22,
+     "pager_cmd": "", "lldp_cmd": "", "syslog_cmd": "", "trap_cmd": "", "note": ""},
 ]
 
 SECRET_FIELDS = ("password", "enable_password")

@@ -60,7 +60,7 @@ def discover_sources() -> Dict[str, str]:
 
     1) 设备表 host 直接当源地址（远程真机场景天然成立）
     2) 本机 docker 里 hostname 与设备名相同的容器，取其网络 IP
-       （scripts/lab.sh 场景：容器 --hostname SPINE1 与设备名一致）
+       （实验环境容器的 hostname 与设备名一致时可用）
     """
     from ..devices import service as device_service
     devices = device_service.enabled_devices()
@@ -153,22 +153,50 @@ def ingest_trap(payload: Dict[str, Any]) -> int:
 
 
 # ── Syslog 服务器（RFC3164：<PRI>时间戳 ident 模块/事件: 消息）────────
-SYSLOG_RE = re.compile(
-    r"^<(?P<pri>\d{1,3})>(?P<ts>\w{3}\s+\d+\s[\d:]{8})\s+"
-    r"(?P<ident>\S+)\s+(?P<module>[^/\s]+)/(?P<event>[^:\s]+):\s*(?P<msg>.*)$")
+# 两种主流线上格式都认：
+#   RFC5424  <PRI>1 时间戳 主机 应用 进程 消息ID [结构化数据] 消息
+#   RFC3164  <PRI>时间戳 [主机] 标签[: ]消息
+# 消息体若以「模块/事件:」开头（不少设备的事件日志都这么写），再细拆一层。
+RFC5424_RE = re.compile(
+    r"^<(?P<pri>\d{1,3})>1\s+(?P<ts>\S+)\s+(?P<host>\S+)\s+(?P<app>\S+)\s+"
+    r"(?P<proc>\S+)\s+(?P<msgid>\S+)\s+(?P<sd>-|\[.*?\])\s*(?P<msg>.*)$", re.S)
+RFC3164_RE = re.compile(
+    r"^<(?P<pri>\d{1,3})>(?P<ts>\w{3}\s+\d{1,2}\s[\d:]{8})\s+(?P<rest>.*)$", re.S)
+MODULE_EVENT_RE = re.compile(r"^(?P<module>[A-Za-z0-9_\-]+)/(?P<event>[^:\s]+):\s*(?P<msg>.*)$", re.S)
 SEVERITIES = ["emerg", "alert", "crit", "error", "warning", "notice", "info", "debug"]
 
 
 def parse_syslog(raw: str, source_ip: str) -> Dict[str, Any]:
-    m = SYSLOG_RE.match(raw.strip())
-    if not m:
-        return {"kind": "syslog", "source_ip": source_ip, "severity": "",
-                "module": "", "event": "", "message": raw.strip()[:500],
-                "raw": raw}
-    sev = SEVERITIES[int(m.group("pri")) % 8]
-    return {"kind": "syslog", "source_ip": source_ip, "severity": sev,
-            "module": m.group("module"), "event": m.group("event"),
-            "message": m.group("msg")[:500], "raw": raw}
+    text = raw.strip()
+    out = {"kind": "syslog", "source_ip": source_ip, "severity": "",
+           "module": "", "event": "", "message": text[:500], "raw": raw}
+    m = RFC5424_RE.match(text)
+    body, tag = "", ""
+    if m:
+        body, tag = m.group("msg"), (m.group("app") if m.group("app") != "-" else "")
+    else:
+        m = RFC3164_RE.match(text)
+        if not m:
+            return out
+        rest = m.group("rest")
+        # rest = [主机 ]标签[: ]消息；标签形如 ident / ident[pid] / 模块/事件
+        words = rest.split(None, 2)
+        if len(words) >= 2 and "/" not in words[0] and not words[0].endswith(":"):
+            words = words[1:] if len(words) > 1 else words       # 去掉主机名
+            rest = " ".join(words)
+        body = rest
+        head = rest.split(None, 1)
+        if head and not MODULE_EVENT_RE.match(rest):
+            tag = head[0].rstrip(":")
+            body = head[1] if len(head) > 1 else ""
+    out["severity"] = SEVERITIES[int(m.group("pri")) % 8]
+    me = MODULE_EVENT_RE.match(body)
+    if me:
+        out.update(module=me.group("module"), event=me.group("event"),
+                   message=me.group("msg")[:500])
+    else:
+        out.update(module=tag, message=body[:500])
+    return out
 
 
 class _SyslogHandler(socketserver.BaseRequestHandler):

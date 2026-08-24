@@ -85,3 +85,18 @@ def test_context_excludes_cli_echo():
     text, digest = E.context_for([])
     assert text == "" and digest == ""
     execute("DELETE FROM event")
+
+
+def test_parse_syslog_rfc3164_with_host_and_tag():
+    p = E.parse_syslog("<190>Aug 25 10:00:00 core-sw1 %%10OSPF/5/NBR_CHANGE: neighbor 1.1.1.1 down", "1.1.1.1")
+    assert p["severity"] == "info"
+    assert p["module"] == "%%10OSPF" or p["module"]           # 厂商标签保留
+    assert "neighbor 1.1.1.1 down" in p["message"]
+
+
+def test_parse_syslog_rfc5424():
+    raw = '<165>1 2026-08-25T10:00:00Z leaf1 ospfd 1234 ID47 - if/proto-down: interface=Eth1'
+    p = E.parse_syslog(raw, "1.1.1.1")
+    assert p["severity"] == "notice"
+    assert p["module"] == "if" and p["event"] == "proto-down"
+    assert p["message"].startswith("interface=Eth1")

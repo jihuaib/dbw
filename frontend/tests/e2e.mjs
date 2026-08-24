@@ -139,7 +139,7 @@ await step('诊断：实时进度 + 真机采集 + AI', async () => {
     await page.goto('http://127.0.0.1:5178/#/diagnose', { waitUntil: 'networkidle' });
     await page.locator('.pane-left').getByRole('button', { name: /新建/ }).click();
     await page.waitForSelector('.starters', { timeout: 8000 });
-    await page.locator('.starters').getByRole('button', { name: 'LEAF2 好像连不上了，帮我看看' }).click();
+    await page.locator('.starters').getByRole('button', { name: /好像连不上了/ }).click();
     // 点完立刻要有反馈 —— 不能干等
     await page.waitForSelector('.bubble.reply.live', { timeout: 6000 });
     await page.waitForFunction(

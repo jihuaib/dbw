@@ -44,7 +44,7 @@ SCHEMA: Dict[str, Any] = {
                                  "enum": ["critical", "major", "minor"]},
                     "statement": {"type": "string", "description": "根因是什么"},
                     "evidence": {"type": "array", "items": {"type": "string"},
-                                 "description": "支撑它的命令回显，如 'LEAF1 display arp'"},
+                                 "description": "支撑它的命令回显，如 '<设备名> <命令>'"},
                     "advice": {"type": "string", "description": "怎么处理"},
                 },
                 "required": ["device", "object", "layer", "severity", "statement",

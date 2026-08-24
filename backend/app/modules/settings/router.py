@@ -25,10 +25,13 @@ class SettingsIn(BaseModel):
     effort: Optional[str] = None
     vote_k: Optional[int] = None
     auto_freeze: Optional[bool] = None
+    kb_exclude_commands: Optional[str] = None
 
 
 @router.put("")
 def update(body: SettingsIn) -> Dict[str, Any]:
+    if body.kb_exclude_commands is not None:
+        service.put("kb_exclude_commands", body.kb_exclude_commands.strip())
     for field in ("provider", "preset", "base_url"):
         value = getattr(body, field)
         if value is not None:

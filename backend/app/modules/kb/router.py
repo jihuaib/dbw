@@ -45,7 +45,7 @@ SAMPLE_DIR = os.path.join(
 
 @router.get("/samples")
 def samples() -> List[str]:
-    """内置示例资料，支持子目录（如 cnetnexus/bgp.md）。"""
+    """内置示例资料（samples 目录，支持按厂商分子目录）。"""
     out: List[str] = []
     if not os.path.isdir(SAMPLE_DIR):
         return out

@@ -24,7 +24,7 @@
                      size="small" bordered>
                 <template #emptyText>
                     <span class="dim">
-                        还没有设备。点「新增设备」填入 CNetNexus 的 Telnet 地址即可。
+                        还没有设备。点「新增设备」，选设备类型预设会自动填好接入参数。
                     </span>
                 </template>
             </NnTable>
@@ -132,7 +132,7 @@
                 <NnRow :gutter="16">
                     <NnCol :span="8">
                         <NnFormItem label="设备名" required>
-                            <NnInput v-model:value="form.name" placeholder="LEAF1" />
+                            <NnInput v-model:value="form.name" placeholder="设备名（须与 LLDP 系统名一致）" />
                         </NnFormItem>
                     </NnCol>
                     <NnCol :span="8">
@@ -301,7 +301,7 @@ const testOpen = ref(false);
 const testing = ref(false);
 const testResult = ref(null);
 const testTarget = ref('');
-const vendorProfile = ref('cnetnexus');
+const vendorProfile = ref('');   // 默认选预设列表第一项（来自 backend/vendors.json）
 const probing = ref(null);
 const caps = ref([]);
 const calibrating = ref(false);
@@ -590,6 +590,7 @@ onMounted(async () => {
     try { suggestedHost.value = (await eventsApi.suggestHost()).host; } catch { /* 可选 */ }
     try {
         options.value = await deviceApi.options();
+        if (!vendorProfile.value && (options.value.vendor_profiles || []).length) vendorProfile.value = options.value.vendor_profiles[0].id;
         caps.value = await deviceApi.capabilities();
         profiles.value = await collectApi.profiles();
         await refresh();

@@ -100,7 +100,7 @@ const running = ref(false);
 const frozen = ref([]);
 
 const form = reactive({
-    question: 'LEAF2 好像连不上了，帮我看看',
+    question: '整网现在有什么问题',
     rounds: 5,
     mode: 'cross',
     gap_ms: 2000

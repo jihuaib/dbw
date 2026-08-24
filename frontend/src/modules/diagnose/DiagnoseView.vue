@@ -34,7 +34,7 @@
                     <div v-if="!turns.length" class="starters">
                         <NnAlert v-if="!devices.length" type="warning" show-icon
                                  style="margin-bottom: 12px">
-                            设备清单为空。先去「设备与拓扑」添加 CNetNexus 设备。
+                            设备清单为空。先去「设备与拓扑」添加设备。
                         </NnAlert>
                         <p class="dim">试试这些问题 —— AI 会自己决定要采哪些命令：</p>
                         <NnSpace wrap>
@@ -237,12 +237,12 @@ import {
 import { collectApi, deviceApi, diagnoseApi } from '../../shared/api.js';
 import Markdown from '../../shared/Markdown.vue';
 
-const STARTERS = [
-    '整网现在有什么问题',
-    'LEAF2 好像连不上了，帮我看看',
-    'LLDP 邻居为什么少了',
-    'OSPF 邻居起来了吗'
-];
+// 起手问题按设备清单生成，不写死设备名
+const STARTERS = computed(() => {
+    const first = devices.value[0] ? devices.value[0].name : '某台设备';
+    return ['整网现在有什么问题', `${first} 好像连不上了，帮我看看`,
+            `${first} 刚才发生了什么`, 'LLDP 邻居为什么少了', 'OSPF 邻居起来了吗'];
+});
 
 const LEVEL = {
     F0: { label: 'F0 指纹冻结命中（零模型调用）', color: 'green' },

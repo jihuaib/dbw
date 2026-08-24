@@ -21,6 +21,11 @@ DEFAULTS = {
     "effort": "high",
     "vote_k": "1",          # 首次生成的自洽投票次数（1 = 不投票）
     "auto_freeze": "1",     # 首答自动冻结；关掉则需人工确认后才冻结
+    # 导入手册时排除的「观测者自照镜子」命令（逗号分隔）：CLI 会话/审计类命令的
+    # 输出必然带着采集自身的痕迹，进了证据快照就永不一致。按设备厂商增删。
+    "kb_exclude_commands": "show cli history, show cli client, show cli context, "
+                           "show cli command-info, show line, display users, "
+                           "display logbuffer, show users, show logging",
 }
 
 
@@ -132,5 +137,6 @@ def public() -> Dict[str, Any]:
         "effort": get("effort") or "high",
         "vote_k": vote_k(),
         "auto_freeze": auto_freeze(),
+        "kb_exclude_commands": get("kb_exclude_commands"),
         "presets": PRESETS,
     }

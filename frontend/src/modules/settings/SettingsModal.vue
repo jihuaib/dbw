@@ -77,6 +77,12 @@
                                       style="width: 160px" />
                         </template>
                     </NnSettingsItem>
+                    <NnSettingsItem title="证据排除命令"
+                                    description="导入手册时排除的 CLI 会话/审计类命令（逗号分隔，按厂商增删）—— 它们的输出带着采集自身的痕迹，进了证据就永不一致">
+                        <template #actions>
+                            <NnTextarea v-model:value="form.kb_exclude_commands" :rows="3" style="width: 360px" />
+                        </template>
+                    </NnSettingsItem>
                     <NnSettingsItem title="首答自动冻结"
                                     description="关闭后首答需人工确认才冻结，适合对结论质量要求高的场合">
                         <template #actions>
@@ -161,7 +167,7 @@ const form = reactive({
     api_key_set: false, api_key_mask: '', api_key_from_env: false,
     provider: 'anthropic', preset: 'claude', base_url: '',
     model: 'claude-opus-5', effort: 'high', vote_k: 1, auto_freeze: true,
-    presets: []
+    kb_exclude_commands: '', presets: []
 });
 
 const presetOptions = computed(() =>
@@ -199,7 +205,8 @@ async function save() {
         const body = {
             provider: form.provider, preset: form.preset, base_url: form.base_url,
             model: form.model, effort: form.effort,
-            vote_k: form.vote_k, auto_freeze: form.auto_freeze
+            vote_k: form.vote_k, auto_freeze: form.auto_freeze,
+            kb_exclude_commands: form.kb_exclude_commands
         };
         if (apiKey.value.trim()) body.api_key = apiKey.value.trim();
         Object.assign(form, await settingsApi.save(body));

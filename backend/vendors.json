@@ -1,0 +1,46 @@
+[
+  {
+    "id": "cnetnexus",
+    "label": "CNetNexus",
+    "protocol": "telnet",
+    "port": 23,
+    "pager_cmd": "terminal length 0",
+    "lldp_cmd": "show lldp neighbors",
+    "syslog_cmd": "syslog server {host} port {port}",
+    "trap_cmd": "snmp trap server {host} port {port}",
+    "note": "CNetNexus 当前只实现 telnet（SSH 是占位命令）；设备侧需先 telnet server enable + transport input telnet"
+  },
+  {
+    "id": "h3c",
+    "label": "H3C Comware",
+    "protocol": "ssh",
+    "port": 22,
+    "pager_cmd": "screen-length disable",
+    "lldp_cmd": "display lldp neighbor-information list",
+    "syslog_cmd": "info-center loghost {host} port {port}",
+    "trap_cmd": "snmp-agent target-host trap address udp-domain {host} udp-port {port} params securityname public",
+    "note": ""
+  },
+  {
+    "id": "cisco",
+    "label": "Cisco IOS",
+    "protocol": "ssh",
+    "port": 22,
+    "pager_cmd": "terminal length 0",
+    "lldp_cmd": "show lldp neighbors",
+    "syslog_cmd": "logging host {host} transport udp port {port}",
+    "trap_cmd": "snmp-server host {host} version 2c public udp-port {port}",
+    "note": ""
+  },
+  {
+    "id": "generic",
+    "label": "其它 / 手动填写",
+    "protocol": "ssh",
+    "port": 22,
+    "pager_cmd": "",
+    "lldp_cmd": "",
+    "syslog_cmd": "",
+    "trap_cmd": "",
+    "note": ""
+  }
+]

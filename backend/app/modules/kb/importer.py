@@ -52,7 +52,7 @@ def read_text(filename: str, raw: bytes) -> str:
 
 
 def _clean(cmd: str) -> str:
-    """只规整空白，**保留大小写** —— 设备的接口名 GE-1 是区分大小写的，
+    """只规整空白，**保留大小写** —— 不少设备的接口名是区分大小写的，
     统一转小写会让命令直接被拒。"""
     return re.sub(r"\s+", " ", cmd.strip())
 
@@ -62,20 +62,19 @@ def _key(cmd: str) -> str:
     return _clean(cmd).lower()
 
 
-# 观测者自照镜子的命令：输出的是 CLI 会话 / 审计状态，必然包含
-# 采集行为自己的痕迹（telnet 连接、带时间戳的命令历史）。
-# 它们进了证据快照就永远不可能两次一致 —— 不是诊断证据，导入时排除。
-OBSERVER_ECHO = {
-    "show cli history", "show cli client", "show cli context",
-    "show cli command-info", "show line",
-}
+def _excluded_commands() -> set:
+    """观测者自照镜子的命令（CLI 会话 / 审计类）：输出必然带着采集自身的痕迹，
+    进了证据快照就永不一致。清单是设置项（按厂商增删），不写死在代码里。"""
+    from ..settings import service as settings
+    raw = settings.get("kb_exclude_commands") or ""
+    return {_key(x) for x in raw.split(",") if x.strip()}
 
 
 def _is_read_only(cmd: str) -> bool:
     tokens = _key(cmd).split()
     if not tokens or tokens[0] not in READ_VERBS:
         return False
-    if _key(cmd) in OBSERVER_ECHO:
+    if _key(cmd) in _excluded_commands():
         return False
     return not any(d in tokens for d in DANGEROUS)
 
@@ -113,7 +112,7 @@ def base_of_syntax(syntax: str) -> str:
 def extract_by_markdown_table(text: str) -> List[Dict[str, Any]]:
     """解析 Markdown 表格式 CLI 文档。
 
-    形如 CNetNexus docs/cli/*.md：
+    形如「| 命令 | 视图 | 说明 |」的 Markdown 表格手册：
         | 命令 | 视图 | 说明 |
         | `show lldp neighbors` | global | 显示 LLDP 邻居概要 |
 
@@ -170,7 +169,7 @@ def looks_like_table_doc(text: str) -> bool:
 def extract_by_inline(text: str) -> List[Dict[str, Any]]:
     """提取行内反引号里的命令 —— 覆盖「标题/列表」式文档。
 
-    形如 CNetNexus docs/cli.md：
+    形如「### `命令`」标题 + 「- **用法**：`命令`」列表的手册：
         ### 2.3 `show current-configuration`
         - **用法**：`show current-configuration`
 
