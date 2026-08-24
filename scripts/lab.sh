@@ -1,6 +1,6 @@
 #!/bin/bash
 # CNetNexus 实验环境：起 4 台真机（1×SPINE + 3×LEAF），配好 IP / LLDP / Telnet
-#   ./scripts/lab.sh up      拉起并配置
+#   ./scripts/lab.sh up      拉起并配置（镜像按架构自动从 GitHub Release 下载）
 #   ./scripts/lab.sh down    销毁
 #   ./scripts/lab.sh fault      注入故障（LEAF2 上行口 shutdown）
 #   ./scripts/lab.sh heal       恢复
@@ -11,8 +11,32 @@
 #   ./scripts/lab.sh fault-fabric  跨设备多异常表项（100% 判据环境，三台设备各一处）
 #   ./scripts/lab.sh heal-fabric   恢复
 set -e
-IMG="${NN_IMAGE:-netnexus:1.0.0-arm64}"
+# 镜像按本机架构自动选择；本地没有就从 CNetNexus 的 GitHub Release 下载并 docker load。
+NN_VERSION="${NN_VERSION:-1.0.0}"
+case "$(uname -m)" in
+  x86_64|amd64) NN_ARCH=amd64 ;;
+  aarch64|arm64) NN_ARCH=arm64 ;;
+  *) echo "不支持的架构: $(uname -m)"; exit 1 ;;
+esac
+IMG="${NN_IMAGE:-netnexus:${NN_VERSION}-${NN_ARCH}}"
 DEVS="nn-spine1 nn-leaf1 nn-leaf2 nn-leaf3"
+
+ensure_image() {
+  docker image inspect "$IMG" >/dev/null 2>&1 && return
+  local tar="netnexus-${NN_VERSION}-docker-${NN_ARCH}.tar.gz"
+  local url="https://github.com/jihuaib/CNetNexus/releases/download/v${NN_VERSION}/${tar}"
+  local cache="${NN_CACHE:-$HOME/.detops}"; mkdir -p "$cache"
+  if [ ! -f "$cache/$tar" ]; then
+    echo "本地没有镜像 $IMG，从 GitHub Release 下载（约 150MB）…"
+    curl -fL --progress-bar -o "$cache/$tar.part" "$url" && mv "$cache/$tar.part" "$cache/$tar" \
+      || { echo "下载失败: $url"; exit 1; }
+  fi
+  echo "docker load $cache/$tar …"
+  docker load -i "$cache/$tar" >/dev/null
+  docker image inspect "$IMG" >/dev/null 2>&1 || {
+    echo "镜像包里的标签不是 $IMG，实际为："; docker images --format '{{.Repository}}:{{.Tag}}' | grep -i netnexus
+    echo "可用 NN_IMAGE=<标签> ./scripts/lab.sh up 指定"; exit 1; }
+}
 
 console() { local c="$1"; shift
   { printf '%s\n' "$@"; printf 'exit\n'; } | docker exec -i \
@@ -21,6 +45,7 @@ console() { local c="$1"; shift
 
 case "${1:-up}" in
 up)
+  ensure_image
   docker rm -f $DEVS >/dev/null 2>&1 || true
   docker network create nn-mgmt >/dev/null 2>&1 || true
   for i in 1 2 3; do docker network create nn-s1l$i >/dev/null 2>&1 || true; done
