@@ -10,6 +10,7 @@
 #   ./scripts/lab.sh heal-multi    恢复
 #   ./scripts/lab.sh fault-fabric  跨设备多异常表项（100% 判据环境，三台设备各一处）
 #   ./scripts/lab.sh heal-fabric   恢复
+#   ./scripts/lab.sh register [后台地址]   把这 4 台设备注册到后台（含上报端口并下发），默认 http://127.0.0.1:8099
 set -e
 # 镜像按本机架构自动选择；本地没有就从 CNetNexus 的 GitHub Release 下载并 docker load。
 NN_VERSION="${NN_VERSION:-1.0.0}"
@@ -165,5 +166,50 @@ heal-fabric)
   console nn-leaf3 config "if GE-1" "no ospf hello-interval 1" end
   echo "已恢复：跨设备多异常表项"
   ;;
-*) echo "用法: $0 {up|down|fault|heal|fault-mtu|heal-mtu|fault-multi|heal-multi|fault-fabric|heal-fabric}"; exit 1 ;;
+register)
+  API="${2:-http://127.0.0.1:8099}"
+  command -v python3 >/dev/null || { echo "需要 python3"; exit 1; }
+  API="$API" python3 - << 'PYEOF'
+import json, os, sys, urllib.request
+api = os.environ["API"].rstrip("/")
+def call(path, payload=None, method=None):
+    req = urllib.request.Request(api + path,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Content-Type": "application/json"},
+        method=method or ("POST" if payload is not None else "GET"))
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+try:
+    opts = call("/api/devices/options")
+except Exception as exc:
+    sys.exit("后台不可达 %s：%s（先 ./scripts/start.sh）" % (api, exc))
+prof = next((p for p in opts["vendor_profiles"] if p["id"] == "cnetnexus"), None) \
+    or sys.exit("vendors.json 里没有 cnetnexus 预设")
+host = call("/api/events/suggest-host")["host"]
+existing = {d["name"]: d for d in call("/api/devices")}
+plan = [("SPINE1", "SPINE", 2301), ("LEAF1", "LEAF", 2302),
+        ("LEAF2", "LEAF", 2303), ("LEAF3", "LEAF", 2304)]
+for i, (name, role, port) in enumerate(plan, 1):
+    body = {"name": name, "role": role, "protocol": prof["protocol"], "host": "127.0.0.1",
+            "port": port, "username": "", "password": "", "enable_password": "",
+            "vendor": prof["label"], "model": "", "pager_cmd": prof["pager_cmd"],
+            "lldp_cmd": prof["lldp_cmd"], "enabled": True, "note": "scripts/lab.sh",
+            "report_host": host, "syslog_port": 5514 + i, "trap_port": 1162 + i,
+            "syslog_cmd": prof.get("syslog_cmd", ""), "trap_cmd": prof.get("trap_cmd", "")}
+    if name in existing:
+        d = call("/api/devices/%d" % existing[name]["id"], body, method="PUT"); act = "更新"
+    else:
+        d = call("/api/devices", body); act = "新增"
+    try:
+        r = call("/api/devices/%d/push-reporting" % d["id"], {})
+        rep = "上报已下发(%d 条)" % len(r["results"])
+    except Exception as exc:
+        rep = "上报下发失败: %s" % exc
+    print("  %s %-7s telnet 127.0.0.1:%d  syslog %d / trap %d  %s" % (act, name, port, 5514 + i, 1162 + i, rep))
+call("/api/events/receivers/start", {})
+print("接收器已按设备端口重启。上报目标地址: %s" % host)
+print("下一步：设备页 → 探测 → 实测标定 → 一键发现拓扑（或直接在诊断页提问）")
+PYEOF
+  ;;
+*) echo "用法: $0 {up|down|fault|heal|fault-mtu|heal-mtu|fault-multi|heal-multi|fault-fabric|heal-fabric|register}"; exit 1 ;;
 esac

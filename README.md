@@ -246,7 +246,8 @@ telnet 原始套接字或 SSH shell，与诊断采集共用设备表里的接入
 ./scripts/start.sh down       # 停
 ./scripts/backend.sh  start|stop|restart|status|logs     # 后台 FastAPI :8099
 ./scripts/frontend.sh start|stop|restart|status|build|logs  # 前台 Vite :5178
-./scripts/lab.sh up           # CNetNexus 实验环境（4 台容器）
+./scripts/lab.sh up           # CNetNexus 实验环境（4 台容器，镜像按架构自动下载）
+./scripts/lab.sh register     # 把 4 台设备注册到后台（telnet 127.0.0.1:2301~2304 + 上报端口并下发）
 ./scripts/test.sh [live|e2e]  # 测试
 ```
 
