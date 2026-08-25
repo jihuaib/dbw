@@ -22,6 +22,11 @@ def import_doc(name: str, raw: bytes, engine: str = "rule") -> Dict[str, Any]:
     if not text.strip():
         raise ValueError("未能从文件中提取到文本")
     digest = sha256_of(raw)
+    dup = query_one("SELECT id, name FROM kb_doc WHERE sha256=?", (digest,))
+    if dup:
+        # 同一份内容已导入过（批量导目录时很常见）：跳过，命令清单不会重复
+        return {"doc_id": dup["id"], "duplicate": True, "name": dup["name"],
+                "found": 0, "added": 0, "engine": "", "warn": "内容相同的文档已导入"}
     path = os.path.join(str(UPLOAD_DIR), "doc-{0}.txt".format(short(digest, 16)))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -89,8 +94,8 @@ def import_doc(name: str, raw: bytes, engine: str = "rule") -> Dict[str, Any]:
             "found": len(commands), "added": added, "warn": warn}
 
 
-def list_docs() -> List[Dict[str, Any]]:
-    rows = query("SELECT * FROM kb_doc ORDER BY id DESC")
+def list_docs(limit: int = 500) -> List[Dict[str, Any]]:
+    rows = query("SELECT * FROM kb_doc ORDER BY id DESC LIMIT ?", (max(1, min(limit, 5000)),))
     for r in rows:
         r["sha256_short"] = short(r["sha256"])
         r["command_count"] = query_one(

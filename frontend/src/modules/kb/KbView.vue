@@ -20,17 +20,45 @@
                     <NnButton size="small" :loading="loadingSample" @click="loadSample">
                         导入内置 CLI 手册（{{ sampleCount }} 份）
                     </NnButton>
-                    <NnButton size="small" type="primary" @click="pick">
-                        <ImportOutlined /> 导入资料
+                    <NnButton size="small" type="primary" :disabled="Boolean(job)" @click="pick">
+                        <ImportOutlined /> 导入文件
+                    </NnButton>
+                    <NnButton size="small" :disabled="Boolean(job)" @click="pickDir">
+                        <ImportOutlined /> 导入文件夹
                     </NnButton>
                 </NnSpace>
             </template>
 
-            <input ref="fileRef" type="file" accept=".docx,.md,.markdown,.txt"
-                   style="display: none" @change="onFile" />
+            <input ref="fileRef" type="file" accept=".docx,.md,.markdown,.txt" multiple
+                   style="display: none" @change="onFiles" />
+            <input ref="dirRef" type="file" webkitdirectory directory multiple
+                   style="display: none" @change="onFiles" />
+
+            <div class="dir-row">
+                <NnInput v-model:value="serverDir" size="small" style="width: 380px"
+                         placeholder="服务器上的目录路径（手册放在服务器时无需经浏览器上传）" />
+                <NnButton size="small" :disabled="!serverDir.trim() || Boolean(job)" @click="importDir">
+                    导入服务器目录（递归）
+                </NnButton>
+            </div>
+
+            <div v-if="job" class="job">
+                <NnProgress :percent="job.total ? Math.round((job.done / job.total) * 100) : 0"
+                            :status="job.status === 'done' ? 'success' : 'active'" />
+                <div class="job-line mono dim">
+                    {{ job.done }}/{{ job.total }} · 提取 {{ job.found }} · 新增 {{ job.added }}
+                    · 重复跳过 {{ job.skipped }} · 失败 {{ job.failed }}
+                    <span v-if="job.current"> · 正在处理 {{ job.current }}</span>
+                </div>
+                <div v-if="job.errors.length" class="job-errors">
+                    <div v-for="(e, i) in job.errors" :key="i" class="dim" style="font-size: 12px">
+                        ✗ {{ e.file }}：{{ e.error }}
+                    </div>
+                </div>
+            </div>
 
             <NnTable :columns="docColumns" :data-source="docs" row-key="id"
-                     size="small" bordered>
+                     size="small" bordered :pagination="{ pageSize: 20 }">
                 <template #emptyText>
                     <span class="dim">还没有资料。导入一份 Word 或 Markdown 手册。</span>
                 </template>
@@ -140,21 +168,74 @@ function pick() {
     }
 }
 
-async function onFile(event) {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('engine', engine.value);
+const DOC_EXT = /\.(docx|md|markdown|txt)$/i;
+const CHUNK = 20;                 // 每次请求带的文件数：文件多时分批传，服务端逐个落库
+const dirRef = ref(null);
+const serverDir = ref('');
+const job = ref(null);
+
+function pickDir() {
+    dirRef.value && dirRef.value.click();
+}
+
+async function pollJob(jobId, agg) {
+    for (;;) {
+        const j = await kbApi.job(jobId);
+        job.value = {
+            ...j,
+            done: agg.done + j.done, total: agg.total, found: agg.found + j.found,
+            added: agg.added + j.added, skipped: agg.skipped + j.skipped,
+            failed: agg.failed + j.failed, errors: [...agg.errors, ...j.errors].slice(0, 30),
+            status: 'running'
+        };
+        if (j.status === 'done') {
+            agg.done += j.done; agg.found += j.found; agg.added += j.added;
+            agg.skipped += j.skipped; agg.failed += j.failed;
+            agg.errors = [...agg.errors, ...j.errors].slice(0, 30);
+            return;
+        }
+        await new Promise(r => setTimeout(r, 700));
+    }
+}
+
+async function onFiles(event) {
+    const all = Array.from(event.target.files || []).filter(f => DOC_EXT.test(f.name));
+    event.target.value = '';
+    if (!all.length) { notificationService.warning('没有可导入的文档（.docx / .md / .markdown / .txt）'); return; }
+    const agg = { done: 0, total: all.length, found: 0, added: 0, skipped: 0, failed: 0, errors: [] };
+    job.value = { ...agg, status: 'running', current: '' };
     try {
-        const res = await kbApi.upload(fd);
+        for (let i = 0; i < all.length; i += CHUNK) {
+            const fd = new FormData();
+            for (const f of all.slice(i, i + CHUNK)) fd.append('files', f, f.webkitRelativePath || f.name);
+            fd.append('engine', engine.value);
+            const { job_id } = await kbApi.uploadBatch(fd);
+            await pollJob(job_id, agg);
+        }
+        job.value = { ...agg, status: 'done', current: '' };
         await refresh();
         reloadMeta();
-        notificationService.success(
-            `已导入，提取 ${res.found} 条命令，新增 ${res.added} 条`);
-        if (res.warn) notificationService.warning(res.warn);
+        notificationService.success(`${agg.total} 份文档处理完成：提取 ${agg.found} 条，新增 ${agg.added} 条，重复跳过 ${agg.skipped}，失败 ${agg.failed}`);
     } catch (err) {
         notificationService.error(err.message);
+        job.value = null;
+    }
+}
+
+async function importDir() {
+    const agg = { done: 0, total: 0, found: 0, added: 0, skipped: 0, failed: 0, errors: [] };
+    try {
+        const { job_id, total } = await kbApi.importDir(serverDir.value.trim(), engine.value);
+        agg.total = total;
+        job.value = { ...agg, status: 'running', current: '' };
+        await pollJob(job_id, agg);
+        job.value = { ...agg, status: 'done', current: '' };
+        await refresh();
+        reloadMeta();
+        notificationService.success(`目录导入完成：${agg.total} 份，提取 ${agg.found} 条，新增 ${agg.added} 条，重复跳过 ${agg.skipped}，失败 ${agg.failed}`);
+    } catch (err) {
+        notificationService.error(err.message);
+        job.value = null;
     }
 }
 
