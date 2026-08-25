@@ -57,6 +57,19 @@ def import_doc(name: str, raw: bytes, engine: str = "rule") -> Dict[str, Any]:
     else:
         commands = importer.extract_by_rule(text)
 
+    if not commands and engine != "ai":
+        # 规则一条都没提到：格式不认识。配了模型就让模型读一遍，别直接给用户一个 0
+        from ..settings import service as settings
+        if settings.api_key():
+            res = importer.extract_by_ai(text)
+            if res["ok"] and res["commands"]:
+                commands, engine = res["commands"], "ai"
+                warn = "规则未识别该格式，已用 AI 提取"
+                execute("UPDATE kb_doc SET engine='ai' WHERE id=?", (doc_id,))
+        if not commands:
+            warn = (warn + "；" if warn else "") + \
+                "未提取到任何只读命令：请检查文档里是否有 display/show 开头的命令行（标题、【命令】、语法行、代码块均可）"
+
     added = 0
     for c in commands:
         try:

@@ -23,8 +23,19 @@ CMD_RE = re.compile(
     r"^\s*(?:<[^>]{1,40}>|\[[^\]]{1,40}\])?\s*"
     r"((?:display|show|dis)\s+[a-z0-9][a-z0-9\-\s]{0,80}?)\s*$",
     re.I | re.M)
+# 手册里命令行前面常见的「装饰」：标题井号、列表符、编号、标签（【命令】/命令格式：/语法：/Syntax:）
+LINE_PREFIX_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*|[-*•]\s+|\d+(?:\.\d+)*\.?\s+)?"
+    r"(?:【[^】]{1,12}】|(?:命令格式|命令|语法|用法|格式|Syntax|Command|Usage)\s*[:：])?\s*")
+# 厂商语法行：display/show 开头，允许 [ ] { } | < > 与大小写参数名，整行取到末尾
+SYNTAX_LINE_RE = re.compile(
+    r"^(?:<[^>]{1,40}>|\[[^\]]{1,40}\])?\s*"
+    r"((?:display|show|dis)\s+[A-Za-z0-9][A-Za-z0-9\-_./:{}\[\]|<>\s,*]{0,160}?)\s*[。；;]?\s*$")
+# H3C/华为风格的必填参数不带 <>，靠命名习惯识别：vlan-id / interface-number / ip-address …
+PARAM_WORD_RE = re.compile(
+    r"^[a-z]+(?:-[a-z]+)*-(?:id|number|name|type|address|list|value|index|prefix|"
+    r"mask|length|string|text|count|time|interval|ip|port)$")
 PLACEHOLDER_RE = re.compile(r"[<\[]?\b([a-z]+(?:-[a-z]+)+)\b[>\]]?")
-
 # Markdown 表格行： | `show lldp neighbors` | global | 显示 LLDP 邻居概要 |
 TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$", re.M)
 BACKTICK_RE = re.compile(r"`([^`]+)`")
@@ -228,43 +239,83 @@ def extract_by_inline(text: str) -> List[Dict[str, Any]]:
     return [found[k] for k in sorted(found)]
 
 
+def _normalize_syntax_line(line: str) -> str:
+    """去掉标题/列表/编号/标签装饰，留下可能是命令的正文。"""
+    return LINE_PREFIX_RE.sub("", line, count=1).strip()
+
+
+def _mark_bare_params(syntax: str) -> str:
+    """把不带 <> 的必填参数（按命名习惯识别）包成 <param>，交给 split_syntax。"""
+    out = []
+    for i, tok in enumerate(syntax.split()):
+        bare = tok.strip("[]{}|,")
+        if i >= 1 and PARAM_WORD_RE.match(bare) and "<" not in tok:
+            tok = tok.replace(bare, "<" + bare + ">")
+        out.append(tok)
+    return " ".join(out)
+
+
 def extract_by_rule(text: str) -> List[Dict[str, Any]]:
-    """正则提取：裸命令行 + 行内反引号两路合并。结果按命令串排序 —— 确定。"""
+    """正则提取：示例行 / 标题行 / 语法行 / 代码块 / 行内反引号，多路合并。
+
+    覆盖的写法（各厂商手册常见）：
+      <Sysname> display ospf peer                      示例行（带提示符）
+      # display ospf peer  /  ## 1.2 display interface  标题就是命令
+      【命令】 display vlan vlan-id                     标签 + 命令
+      display ospf [ process-id ] peer [ verbose ]      「命令格式」段的语法行
+      ```display ip routing-table [ verbose ]```        代码块
+    同一命令多次出现只留一条（保留样例回显最长的），按命令串排序 —— 结果确定。
+    """
     found: Dict[str, Dict[str, Any]] = {}
     lines = text.replace("\r\n", "\n").split("\n")
     for idx, line in enumerate(lines):
-        m = CMD_RE.match(line)
+        body = _normalize_syntax_line(line)
+        if not body or body.startswith("|"):
+            continue
+        m = SYNTAX_LINE_RE.match(body)
         if not m:
             continue
-        cmd = _clean(m.group(1))
+        syntax = _clean(m.group(1))
+        parsed = split_syntax(_mark_bare_params(syntax))
+        cmd = parsed["base"]
         if not _is_read_only(cmd) or len(cmd.split()) < 2:
             continue
-        # 命令行之后连续的非空行当作样例回显
+        # 命令行之后连续的非空行当作样例回显（示例行才有；语法行后面通常是说明）
         sample: List[str] = []
-        j = idx + 1
-        while j < len(lines) and lines[j].strip() and not CMD_RE.match(lines[j]):
-            sample.append(lines[j])
-            if len(sample) >= 24:
-                break
-            j += 1
+        if line.strip().startswith("<") or line.strip().startswith("["):
+            j = idx + 1
+            while j < len(lines) and lines[j].strip() and not SYNTAX_LINE_RE.match(
+                    _normalize_syntax_line(lines[j])):
+                sample.append(lines[j])
+                if len(sample) >= 24:
+                    break
+                j += 1
         # 命令行之前最近的非空行当作用途说明
         purpose = ""
         k = idx - 1
         while k >= 0 and k > idx - 6:
-            if lines[k].strip() and not CMD_RE.match(lines[k]):
-                purpose = lines[k].strip()[:120]
+            prev = lines[k].strip()
+            if prev and not SYNTAX_LINE_RE.match(_normalize_syntax_line(prev)) \
+                    and not prev.startswith("```"):
+                purpose = LINE_PREFIX_RE.sub("", prev, count=1).strip()[:120]
                 break
             k -= 1
-        prev = found.get(_key(cmd))
-        if prev and len(prev["sample"]) >= len("\n".join(sample)):
+        prev_entry = found.get(_key(cmd))
+        if prev_entry:
+            # 已有：样例更长的替换；语法更完整（含参数）的补上
+            if len("\n".join(sample)) > len(prev_entry["sample"]):
+                prev_entry["sample"] = "\n".join(sample)
+            if len(syntax) > len(prev_entry["syntax"]) and parsed["required"] and not prev_entry["required"]:
+                prev_entry.update(syntax=syntax, required=parsed["required"],
+                                  params=sorted(set(parsed["required"])))
             continue
         found[_key(cmd)] = {
             "command": cmd,
-            "syntax": cmd,
-            "required": [],
+            "syntax": syntax,
+            "required": parsed["required"],
             "purpose": purpose,
             "keywords": sorted(set(t for t in cmd.split() if t not in READ_VERBS)),
-            "params": sorted(set(PLACEHOLDER_RE.findall(cmd))),
+            "params": sorted(set(parsed["required"])),
             "sample": "\n".join(sample),
             "read_only": True,
         }

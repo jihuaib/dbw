@@ -65,3 +65,35 @@ def test_observer_echo_commands_excluded():
           "| `show version` | any | 版本 |\n")
     cmds = {c["command"] for c in I.extract_by_markdown_table(md)}
     assert cmds == {"show version"}
+
+
+H3C_MD = """# display ospf peer
+
+## 命令功能
+display ospf peer 命令用来显示 OSPF 邻居的信息。
+
+## 命令格式
+display ospf [ process-id ] peer [ verbose ] [ interface-type interface-number ] [ neighbor-id ]
+
+## 视图
+任意视图
+
+# 1.2 display interface brief
+
+【命令】 display interface [ interface-type [ interface-number ] ] brief [ description ]
+
+```
+display ip routing-table [ verbose ]
+```
+
+【命令】 display vlan vlan-id
+"""
+
+
+def test_h3c_style_markdown():
+    cmds = {c["command"]: c for c in I.extract_by_rule(H3C_MD)}
+    assert "display ospf peer" in cmds                 # 标题 + 命令格式段
+    assert "display interface brief" in cmds           # 【命令】 行，可选段剥掉
+    assert "display ip routing-table" in cmds          # 代码块
+    assert cmds["display vlan"]["required"] == ["vlan-id"]   # 不带 <> 的必填参数按命名识别
+    assert "任意视图" not in cmds                       # 非命令行不会误入
