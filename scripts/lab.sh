@@ -24,7 +24,18 @@ IMG="${NN_IMAGE:-netnexus:${NN_VERSION}-${NN_ARCH}}"
 DEVS="nn-spine1 nn-leaf1 nn-leaf2 nn-leaf3"
 
 ensure_image() {
-  docker image inspect "$IMG" >/dev/null 2>&1 && return
+  # 1) 指定/默认标签本地已有 → 直接用
+  if docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "使用本地镜像 $IMG"; return
+  fi
+  # 2) 本地已有别的 netnexus 镜像（自己 load/tag 过的）→ 优先用同架构的那一个，不下载
+  local found
+  found="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -i 'netnexus' | grep -v '<none>' | grep -i -- "$NN_ARCH" | head -1)"
+  [ -n "$found" ] || found="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -i 'netnexus' | grep -v '<none>' | head -1)"
+  if [ -n "$found" ]; then
+    echo "本地已有镜像 $found，直接使用（想强制用别的：NN_IMAGE=<标签>）"; IMG="$found"; return
+  fi
+  # 3) 真没有 → 从 GitHub Release 下载并 load（缓存到 ~/.detops，只下一次）
   local tar="netnexus-${NN_VERSION}-docker-${NN_ARCH}.tar.gz"
   local url="https://github.com/jihuaib/CNetNexus/releases/download/v${NN_VERSION}/${tar}"
   local cache="${NN_CACHE:-$HOME/.detops}"; mkdir -p "$cache"
@@ -39,6 +50,10 @@ ensure_image() {
     echo "镜像包里的标签不是 $IMG，实际为："; docker images --format '{{.Repository}}:{{.Tag}}' | grep -i netnexus
     echo "可用 NN_IMAGE=<标签> ./scripts/lab.sh up 指定"; exit 1; }
 }
+
+if [ "$(id -u)" = "0" ] && [ -n "$SUDO_USER" ]; then
+  echo "提示：用 sudo 运行会切到 root 的 docker 环境与 HOME，可能看不到你已有的镜像/缓存；建议把用户加入 docker 组后直接运行。"
+fi
 
 console() { local c="$1"; shift
   { printf '%s\n' "$@"; printf 'exit\n'; } | docker exec -i \
