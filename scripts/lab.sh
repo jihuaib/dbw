@@ -63,16 +63,19 @@ up)
   docker network create nn-mgmt >/dev/null 2>&1 || true
   for i in 1 2 3; do docker network create nn-s1l$i >/dev/null 2>&1 || true; done
 
-  docker run -d -i --name nn-spine1 --network nn-mgmt --hostname SPINE1 \
+  # 先 create、把所有网络连好、再 start —— 镜像的启动脚本会为 GE 口自建 eth1..eth8，
+  # 若容器先跑起来，随后的 network connect 给 veth 改名 eth1 时会撞「file exists」（机器越快越容易撞）。
+  docker create -i --name nn-spine1 --network nn-mgmt --hostname SPINE1 \
     --cap-add NET_ADMIN --cap-add NET_RAW --security-opt seccomp=unconfined \
     -p 2301:23 "$IMG" >/dev/null
   for i in 1 2 3; do
-    docker run -d -i --name nn-leaf$i --network nn-mgmt --hostname LEAF$i \
+    docker create -i --name nn-leaf$i --network nn-mgmt --hostname LEAF$i \
       --cap-add NET_ADMIN --cap-add NET_RAW --security-opt seccomp=unconfined \
       -p 230$((i+1)):23 "$IMG" >/dev/null
     docker network connect nn-s1l$i nn-spine1
     docker network connect nn-s1l$i nn-leaf$i
   done
+  docker start nn-spine1 nn-leaf1 nn-leaf2 nn-leaf3 >/dev/null
 
   # Linux 网桥默认过滤 LLDP 的 01:80:c2:00:00:0e，必须放开否则邻居发现不到
   docker run --rm --privileged --net=host alpine sh -c \
