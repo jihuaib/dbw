@@ -18,8 +18,7 @@ from ...core.canon import canonical_json, sha256_of
 from ...core.config import PLAN_VERSION
 from ..devices import service as device_service
 from ..kb import service as kb
-
-FORBIDDEN = set("|;&`$<>\n\r\t")
+from ..kb import syntax as cli_syntax
 
 # 计划规模上限。一次诊断挑几百条命令不是诊断，是数据倾倒 ——
 # 采集慢、快照大、模型还得在噪声里找信号。
@@ -100,8 +99,29 @@ PLAN_SYSTEM = (
 
 
 def _catalog_index() -> Dict[str, Dict[str, Any]]:
-    """键用小写便于匹配，值里保留原始大小写的命令 —— 设备的 GE-1 区分大小写。"""
-    return {c["command"].lower(): c for c in kb.list_commands(enabled_only=True)}
+    """完整 syntax 是身份；同一命令前缀可以有多个正式语法变体。"""
+    out: Dict[str, Dict[str, Any]] = {}
+    for index, command in enumerate(kb.list_commands(enabled_only=True)):
+        identity = (command.get("syntax") or command["command"]).lower()
+        out["{0}\x1f{1}".format(identity, command.get("id", index))] = command
+    return out
+
+
+def _legacy_validate(raw: str, entry: Dict[str, Any]) -> Optional[str]:
+    """Compatibility for tests/old rows that do not carry a syntax grammar."""
+    tokens = raw.split()
+    base_tokens = str(entry.get("command", "")).split()
+    if len(tokens) < len(base_tokens):
+        return None
+    if [x.lower() for x in tokens[:len(base_tokens)]] != \
+            [x.lower() for x in base_tokens]:
+        return None
+    args = tokens[len(base_tokens):]
+    if any(not cli_syntax.SAFE_TOKEN_RE.fullmatch(arg) for arg in args):
+        return None
+    if len(args) != len(entry.get("required") or []):
+        return None
+    return " ".join(base_tokens + args)
 
 
 def _validate(command: str, catalog: Dict[str, Dict[str, Any]]) -> Optional[str]:
@@ -111,24 +131,26 @@ def _validate(command: str, catalog: Dict[str, Dict[str, Any]]) -> Optional[str]
     · 必需参数没填齐的一律不放行 —— 那种命令设备会回 "Incomplete command"，
       错误文本混进证据快照就是在污染诊断输入
     """
-    raw = " ".join(str(command).split())
-    if any(ch in raw for ch in FORBIDDEN):
+    original = str(command)
+    # 必须在 split() 之前拒绝换行/控制字符，否则折叠后注入痕迹已经消失。
+    if not cli_syntax.safe_command_text(original):
         return None
-    tokens = raw.split()
-    lower = [t.lower() for t in tokens]
-    for cut in range(len(tokens), 1, -1):
-        base = " ".join(lower[:cut])
-        entry = catalog.get(base)
-        if not entry:
-            continue
-        args = tokens[cut:]
-        if any(not re.fullmatch(r"[A-Za-z0-9_.:/\-]+", a) for a in args):
-            return None
-        need = entry.get("required") or []
-        if len(args) < len(need):
-            return None      # 必需参数没给够，不下发
-        return " ".join(entry["command"].split() + args)
-    return None
+    raw = " ".join(original.split())
+    matches = []
+    for entry in catalog.values():
+        grammar = entry.get("syntax")
+        if grammar:
+            got = cli_syntax.match(grammar, raw)
+            if got:
+                matches.append((
+                    -got.literal_count, got.parameter_count,
+                    str(grammar).lower(), got.command))
+        else:
+            got_command = _legacy_validate(raw, entry)
+            if got_command:
+                matches.append((0, len(entry.get("required") or []),
+                                str(entry.get("command", "")).lower(), got_command))
+    return min(matches)[-1] if matches else None
 
 
 def build_plan(question: str, devices: List[str],
@@ -146,7 +168,8 @@ def build_plan(question: str, devices: List[str],
         "- {0}{1}{2}".format(
             c.get("syntax") or c["command"],
             "  # " + c["purpose"] if c["purpose"] else "",
-            ("  必须补齐参数: " + "/".join(c["required"]) if c.get("required")
+            ("  含必填参数，按完整语法补齐；参数候选: " +
+             "/".join(c.get("params") or c["required"]) if c.get("required")
              else ("  可直接下发: " + c["command"]
                    if c.get("syntax") != c["command"] else "")))
         for c in (catalog[k] for k in sorted(catalog)))
@@ -182,8 +205,10 @@ def build_plan(question: str, devices: List[str],
         engine = "fallback"
         error = res.get("error", "") or "AI 未给出可用计划"
         # 兜底只发「不需要参数」的命令 —— 需要参数的没法凭空填
-        safe = [c["command"] for c in
-                (catalog[k] for k in sorted(catalog)) if not (c.get("required") or [])]
+        safe_map = {c["command"].lower(): c["command"] for c in
+                    (catalog[k] for k in sorted(catalog))
+                    if kb.runnable_command(c)}
+        safe = [safe_map[k] for k in sorted(safe_map)]
         steps = [{"device": d, "command": cmd, "reason": "兜底全量采集"}
                  for d in sorted(devices) for cmd in safe
                  if cmd not in blocked.get(d, set())]

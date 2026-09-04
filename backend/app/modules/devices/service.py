@@ -410,8 +410,14 @@ def probe_device(device_id: int) -> Dict[str, Any]:
         raise ValueError("设备不存在")
     # 需要必需参数的命令不探测：裸发一定被拒，那不代表设备不支持它
     all_cmds = kb.list_commands(enabled_only=True)
-    cmds = [c["command"] for c in all_cmds if not (c.get("required") or [])]
-    skipped = [c["command"] for c in all_cmds if c.get("required")]
+    runnable, skipped_set = [], set()
+    for command in all_cmds:
+        if kb.runnable_command(command):
+            runnable.append(command)
+        else:
+            skipped_set.add(command["command"])
+    cmds = sorted({c["command"] for c in runnable})
+    skipped = sorted(skipped_set)
     tr = open_for(d)
     ok = bad = 0
     details: List[Dict[str, Any]] = []

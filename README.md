@@ -246,6 +246,55 @@ telnet 原始套接字或 SSH shell，与诊断采集共用设备表里的接入
 
 ## 快速开始
 
+运行环境最低需要 Python `3.9`、Node.js `16.20.2` 和 npm `8.19.0`；也兼容更高版本。
+
+### Windows（PowerShell 5.1+）
+
+```powershell
+.\scripts\start.ps1 up       # 开发模式：FastAPI :8099 + Vite :5178
+.\scripts\start.ps1 prod     # 生产模式：构建前端后由 FastAPI :8099 托管
+.\scripts\start.ps1 status   # 查看两个服务状态
+.\scripts\start.ps1 restart  # 重启两个服务
+.\scripts\start.ps1 down     # 停止两个服务
+
+.\scripts\backend.ps1 status
+.\scripts\frontend.ps1 logs -Follow
+```
+
+后端入口支持 `start/stop/restart/status/logs`，前端入口另支持 `build`。如果 PowerShell 执行策略
+禁止直接运行 `.ps1`，使用 `.\scripts\start.cmd up`。首次启动会自动创建
+`.venv` 并安装后端、前端依赖；服务在隐藏窗口运行，stdout/stderr 日志分别写在
+`backend/data/*.windows.*.log` 和 `frontend/.frontend.windows.*.log`。自定义后端监听
+地址或端口可先设置 `$env:DETOPS_HOST` / `$env:DETOPS_PORT`，Vite 的 `/api` 代理会同步
+使用相同目标。首次监听局域网地址时，Windows 防火墙可能提示是否允许访问。
+
+Windows 原生脚本只启动应用本身；`scripts/lab.sh` 的容器网络实验仍需 Linux 或 WSL2。
+
+#### 后端依赖离线安装
+
+如果 Windows 无法访问 PyPI，可在能联网的 Linux 上为当前 Windows Python 3.11 x64 下载
+预编译 wheels：
+
+```bash
+mkdir -p backend/wheelhouse
+python3 -m pip download \
+  --dest backend/wheelhouse \
+  --only-binary=:all: \
+  --platform win_amd64 \
+  --python-version 311 \
+  --implementation cp \
+  --abi cp311 \
+  -r backend/requirements.txt \
+  colorama
+```
+
+如果 Linux 和 Windows 使用同一份目录（例如 WSL），下载完成后直接回到 Windows 执行
+`\.\scripts\start.cmd`；否则将整个 `backend/wheelhouse` 目录复制到 Windows 工程的相同
+位置。启动脚本检测到该目录后会自动使用 `--no-index` 离线安装。也可以把离线包放在其它
+目录，并通过 `$env:DETOPS_WHEELHOUSE = 'D:\dbw-wheels'` 指定。
+
+### Linux
+
 ```bash
 ./scripts/start.sh            # 一键起前后台（自动建 venv / npm install）
 ./scripts/start.sh down       # 停
@@ -312,6 +361,10 @@ cd frontend && npm install && npm run dev     # http://localhost:5178
 
 ```
 scripts/lab.sh                CNetNexus 实验环境（起/停/注入故障/恢复）
+scripts/start.ps1             Windows 一键起停（开发/生产/状态/日志）
+scripts/start.cmd             PowerShell 执行策略受限时的 Windows 入口
+scripts/backend.ps1           Windows 后端服务入口
+scripts/frontend.ps1          Windows 前端服务入口
 backend/app/
   core/
     providers.py             多服务商适配（Anthropic SDK / OpenAI 兼容）

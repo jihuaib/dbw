@@ -11,18 +11,22 @@
 """
 from __future__ import annotations
 
+import html
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from . import syntax as cli_syntax
+
+
+# 已入库文档带这个版本。解析规则升级后，相同 SHA 的文档会自动重建命令，
+# 不会继续被“内容重复”短路而永远保留旧的错误结果。
+IMPORTER_VERSION = "KB-2.0.0"
 
 # 只收只读命令。写命令永不进清单 —— 诊断不该改设备状态。
 READ_VERBS = ("display", "show", "dis")
 DANGEROUS = ("reset", "undo", "reboot", "delete", "erase", "save", "shutdown",
              "format", "install", "upgrade", "restore", "copy", "rename")
 
-CMD_RE = re.compile(
-    r"^\s*(?:<[^>]{1,40}>|\[[^\]]{1,40}\])?\s*"
-    r"((?:display|show|dis)\s+[a-z0-9][a-z0-9\-\s]{0,80}?)\s*$",
-    re.I | re.M)
 # 手册里命令行前面常见的「装饰」：标题井号、列表符、编号、标签（【命令】/命令格式：/语法：/Syntax:）
 LINE_PREFIX_RE = re.compile(
     r"^\s*(?:#{1,6}\s*|[-*•]\s+|\d+(?:\.\d+)*\.?\s+)?"
@@ -35,14 +39,15 @@ SYNTAX_LINE_RE = re.compile(
 PARAM_WORD_RE = re.compile(
     r"^[a-z]+(?:-[a-z]+)*-(?:id|number|name|type|address|list|value|index|prefix|"
     r"mask|length|string|text|count|time|interval|ip|port)$")
-PLACEHOLDER_RE = re.compile(r"[<\[]?\b([a-z]+(?:-[a-z]+)+)\b[>\]]?")
 # Markdown 表格行： | `show lldp neighbors` | global | 显示 LLDP 邻居概要 |
 TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$", re.M)
 BACKTICK_RE = re.compile(r"`([^`]+)`")
-# 语法里的参数占位：<name> / [optional] / {a|b}
-ANGLE_RE = re.compile(r"<([^<>|]+)>")
-OPTIONAL_RE = re.compile(r"\[[^\[\]]*\]")
-CHOICE_RE = re.compile(r"\{[^{}]*\}")
+HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+LABEL_RE = re.compile(r"^\s*【([^】]+)】\s*$")
+READ_START_RE = re.compile(r"^(?:display|show|dis)\s+", re.I)
+TABLE_HEADER_COMMANDS = {"命令", "命令格式", "command", "cli command", "syntax"}
+TABLE_HEADER_VIEWS = {"视图", "view", "mode"}
+TABLE_HEADER_PURPOSES = {"说明", "描述", "功能", "用途", "purpose", "description"}
 
 
 def read_text(filename: str, raw: bytes) -> str:
@@ -93,31 +98,156 @@ def _is_read_only(cmd: str) -> bool:
 def split_syntax(syntax: str) -> Dict[str, Any]:
     """把语法串拆成「可下发基串 + 必需参数」。
 
-    `[可选]` 和 `{选择}` 可以剥掉，但 **`<param>` 如果不在方括号里就是必需的** ——
-    剥掉它得到的基串设备会回 "Incomplete command"。这类命令必须带参数才能下发。
+    `[]` 是可选组，`{a|b}` 是必选分支，`<param>` 是参数。嵌套结构和
+    “参数后还有固定词”的语法统一由 :mod:`kb.syntax` 解析，导入与下发共用同一口径。
     """
-    line = syntax.strip()
-    prev = None
-    while prev != line:
-        prev = line
-        line = OPTIONAL_RE.sub(" ", line)   # 可选段整段去掉
-        line = CHOICE_RE.sub(" ", line)     # 选择段暂不展开
-    required: List[str] = ANGLE_RE.findall(line)
-    # 基串 = 第一个必需参数之前的固定 token
-    head: List[str] = []
-    for tok in line.split():
-        if tok.startswith("<") or tok.startswith("["):
-            break
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-]*", tok):
-            head.append(tok)
-        else:
-            break
-    return {"base": " ".join(head),
-            "required": [r.strip() for r in required if r.strip()]}
+    parsed = cli_syntax.analyze(syntax)
+    return {"base": parsed["base"], "required": parsed["required"]}
 
 
 def base_of_syntax(syntax: str) -> str:
     return split_syntax(syntax)["base"]
+
+
+def _entry(syntax: str, purpose: str = "",
+           keywords: Optional[List[str]] = None,
+           sample: str = "") -> Optional[Dict[str, Any]]:
+    """Build one command row from a complete syntax variant."""
+    syntax = _clean(syntax)
+    if not syntax or len(syntax) > 4096:
+        return None
+    try:
+        parsed = cli_syntax.analyze(syntax)
+    except ValueError:
+        return None
+    command = parsed["command"]
+    literals = [str(token).lower() for token in parsed["literals"]]
+    if any(token in DANGEROUS for token in literals) \
+            or not cli_syntax.starts_with_one_of(syntax, READ_VERBS) \
+            or not _is_read_only(command) or len(command.split()) < 2:
+        return None
+    words = {token for token in literals if token not in READ_VERBS}
+    words.update(str(t).lower() for t in (keywords or []) if str(t).strip())
+    return {
+        "command": command,
+        "syntax": syntax,
+        "required": parsed["required"],
+        "purpose": (purpose or "")[:200],
+        "keywords": sorted(words),
+        "params": sorted(set(parsed["params"])),
+        "sample": sample,
+        "read_only": True,
+    }
+
+
+def _plain_markdown(value: str, parameters: bool = False) -> str:
+    """Unwrap Huawei-style Markdown while retaining CLI grammar punctuation."""
+    # Remove real HTML tags before unescaping entities: ``&lt;1-32&gt;`` is a
+    # CLI grammar annotation and must not be mistaken for an HTML tag.
+    value = re.sub(
+        r"</?(?:p|br|span|div|code|strong|em|table|tbody|thead|tr|th|td|ul|ol|li)"
+        r"(?:\s+[^>]*)?>", " ", value or "", flags=re.I)
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\\([\[\]{}|#])", r"\1", value)
+    value = re.sub(r"\*\*(.+?)\*\*", r"\1", value)
+    if parameters:
+        def mark(match: re.Match) -> str:
+            # Some manuals italicize two adjacent parameters as one span.
+            names = match.group(1).split()
+            return " ".join("<{0}>".format(name) for name in names)
+        value = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", mark, value)
+        # Canonicalize Huawei's repeat suffix as one grammar token.  The CLI
+        # matcher interprets ``<community>&<1-32>`` as 1..32 values.
+        value = re.sub(
+            r"(<[^<>]+>)\s*&+\s*<(\d+(?:-\d+)?)>", r"\1&<\2>", value)
+    else:
+        value = value.replace("*", "")
+    value = re.sub(r"[\u00ad\u200b\u200c\u200d\ufeff]", "", value)
+    return _clean(value)
+
+
+def extract_by_command_blocks(text: str) -> List[Dict[str, Any]]:
+    """Extract formal variants from independent ``【命令】`` sections.
+
+    Large Huawei manuals wrap fixed words in ``**bold**``, parameters in
+    ``*italic*``, escape square brackets, and fold one syntax across many
+    physical lines.  Paragraph boundaries, not individual lines, delimit the
+    variants.  Once this high-confidence structure is present it is safer than
+    scanning examples and explanatory tables elsewhere in the document.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    found: Dict[str, Dict[str, Any]] = {}
+    heading = ""
+    intro: List[str] = []
+    i = 0
+    while i < len(lines):
+        title = HEADING_RE.match(lines[i])
+        if title:
+            heading = _plain_markdown(title.group(1))
+            intro = []
+            i += 1
+            continue
+        label = LABEL_RE.match(lines[i])
+        if label and label.group(1).strip() == "命令":
+            i += 1
+            body: List[str] = []
+            while i < len(lines) and not LABEL_RE.match(lines[i]) \
+                    and not HEADING_RE.match(lines[i]):
+                body.append(lines[i])
+                i += 1
+            purpose = _plain_markdown("\n".join(intro))
+            paragraphs = re.split(
+                r"\n[\t \u00a0\u200b\u200c\ufeff]*\n+",
+                "\n".join(body).strip())
+            heading_words = [t for t in heading.split()
+                             if t.lower() not in READ_VERBS]
+            for paragraph in paragraphs:
+                syntax = _plain_markdown(paragraph, parameters=True)
+                if not READ_START_RE.match(syntax):
+                    continue
+                entry = _entry(syntax, purpose, heading_words)
+                if entry:
+                    found[_key(syntax)] = entry
+            continue
+        if heading and not label:
+            intro.append(lines[i])
+        i += 1
+    return [found[k] for k in sorted(found)]
+
+
+def _split_markdown_cells(body: str) -> List[str]:
+    """Split a Markdown row without cutting escaped/code-span ``|`` tokens."""
+    cells: List[str] = []
+    buf: List[str] = []
+    in_code = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == '\\' and i + 1 < len(body) and body[i + 1] == '|':
+            buf.append("|")
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+            buf.append(ch)
+        elif ch == "|" and not in_code:
+            cells.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    cells.append("".join(buf).strip())
+    return cells
+
+
+def _table_header(value: str) -> str:
+    value = BACKTICK_RE.sub(lambda match: match.group(1), value)
+    return re.sub(r"[*_\s]+", " ", value).strip().lower()
+
+
+def _separator_cell(value: str) -> bool:
+    return bool(value) and set(value) <= set("-: ")
 
 
 def extract_by_markdown_table(text: str) -> List[Dict[str, Any]]:
@@ -131,6 +261,7 @@ def extract_by_markdown_table(text: str) -> List[Dict[str, Any]]:
     """
     found: Dict[str, Dict[str, Any]] = {}
     section = ""
+    command_col, view_col, purpose_col = 0, 1, 2
     for line in text.replace("\r\n", "\n").split("\n"):
         stripped = line.strip()
         if stripped.startswith("#"):
@@ -139,42 +270,63 @@ def extract_by_markdown_table(text: str) -> List[Dict[str, Any]]:
         m = TABLE_ROW_RE.match(line)
         if not m:
             continue
-        cells = [c.strip() for c in m.group(1).split("|")]
-        if len(cells) < 2 or set(cells[0]) <= set("-: "):
+        cells = _split_markdown_cells(m.group(1))
+        if len(cells) < 2 or all(_separator_cell(c) for c in cells):
             continue
-        marks = BACKTICK_RE.findall(cells[0])
-        syntax = (marks[0] if marks else cells[0]).strip()
-        if not syntax or syntax.startswith("命令"):
+        headers = [_table_header(c) for c in cells]
+        command_headers = [i for i, value in enumerate(headers)
+                           if value in TABLE_HEADER_COMMANDS]
+        if command_headers:
+            command_col = command_headers[0]
+            view_col = next((i for i, value in enumerate(headers)
+                             if value in TABLE_HEADER_VIEWS), -1)
+            purpose_col = next((i for i, value in enumerate(headers)
+                                if value in TABLE_HEADER_PURPOSES), -1)
             continue
-        parsed = split_syntax(syntax)
-        base = parsed["base"]
-        if not _is_read_only(base) or len(base.split()) < 2:
+        if command_col >= len(cells):
             continue
-        view = cells[1] if len(cells) > 1 else ""
-        purpose = cells[2] if len(cells) > 2 else ""
-        params = sorted({p.strip() for p in ANGLE_RE.findall(syntax) if p.strip()})
-        prev = found.get(_key(base))
-        # 同一基串出现多次时，保留语法最短的那条 —— 参数最少、最容易下发
-        if prev and len(prev["syntax"]) <= len(syntax):
+        marks = BACKTICK_RE.findall(cells[command_col])
+        syntax = (marks[0] if marks else cells[command_col]).strip()
+        syntax = _plain_markdown(syntax, parameters=True)
+        if not READ_START_RE.match(syntax):
             continue
-        found[_key(base)] = {
-            "command": base,
-            "syntax": syntax,
-            "required": parsed["required"],
-            "purpose": (purpose or section or "")[:200],
-            "keywords": sorted({t.lower() for t in base.split()
-                                if t.lower() not in READ_VERBS}
-                               | ({view.lower()} if view else set())),
-            "params": params,
-            "sample": "",
-            "read_only": True,
-        }
-    return [found[k] for k in sorted(found)]
+        view = cells[view_col] if 0 <= view_col < len(cells) else ""
+        purpose = cells[purpose_col] if 0 <= purpose_col < len(cells) else ""
+        entry = _entry(syntax, purpose or section, [view] if view else [])
+        if entry:
+            found[_key(syntax)] = entry
+    return sorted(found.values(), key=lambda item: (
+        _key(item["command"]), _key(item["syntax"])))
 
 
 def looks_like_table_doc(text: str) -> bool:
+    # 独立【命令】块比说明表格更权威；厂商手册里的大量字段表不能把整份
+    # 文档误分流到 table 引擎。
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        label = LABEL_RE.match(line)
+        if label and label.group(1).strip() == "命令":
+            return False
     rows = TABLE_ROW_RE.findall(text)
-    return len(rows) >= 5 and text.count("`") >= 10
+    if len(rows) < 2:
+        return False
+    command_col = 0
+    saw_header = False
+    for raw in rows:
+        cells = _split_markdown_cells(raw)
+        headers = [_table_header(c) for c in cells]
+        indexes = [i for i, value in enumerate(headers)
+                   if value in TABLE_HEADER_COMMANDS]
+        if indexes:
+            command_col, saw_header = indexes[0], True
+            continue
+        if all(_separator_cell(c) for c in cells) or command_col >= len(cells):
+            continue
+        cell = cells[command_col]
+        marks = BACKTICK_RE.findall(cell)
+        syntax = _plain_markdown(marks[0] if marks else cell, parameters=True)
+        if READ_START_RE.match(syntax):
+            return saw_header or len(rows) >= 3
+    return False
 
 
 def extract_by_inline(text: str) -> List[Dict[str, Any]]:
@@ -209,34 +361,24 @@ def extract_by_inline(text: str) -> List[Dict[str, Any]]:
                         found[k]["purpose"] = desc
                 await_desc = []
         for mark in BACKTICK_RE.findall(line):
-            syntax = _clean(mark)
-            parsed = split_syntax(syntax)
-            base = parsed["base"]
-            if not _is_read_only(base) or len(base.split()) < 2:
+            syntax = _plain_markdown(mark, parameters=True)
+            entry = _entry(syntax)
+            if not entry:
                 continue
-            prev = found.get(_key(base))
-            # 同一基串多次出现，保留语法最短的那条 —— 参数最少、最容易下发
-            if prev and len(prev["syntax"]) <= len(syntax):
+            base = entry["command"]
+            identity = _key(syntax)
+            if identity in found:
                 continue
             purpose = desc or BACKTICK_RE.sub(
                 lambda m: m.group(1), section).strip()[:120]
             if _key(purpose) == _key(base):
                 purpose = ""
-            found[_key(base)] = {
-                "command": base,
-                "syntax": syntax,
-                "required": parsed["required"],
-                "purpose": purpose,
-                "keywords": sorted(set(t for t in base.split()
-                                       if t not in READ_VERBS)),
-                "params": sorted({x.strip() for x in ANGLE_RE.findall(syntax)
-                                  if x.strip()}),
-                "sample": "",
-                "read_only": True,
-            }
+            entry["purpose"] = purpose
+            found[identity] = entry
             if is_heading and not purpose:
-                await_desc.append(_key(base))
-    return [found[k] for k in sorted(found)]
+                await_desc.append(identity)
+    return sorted(found.values(), key=lambda item: (
+        _key(item["command"]), _key(item["syntax"])))
 
 
 def _normalize_syntax_line(line: str) -> str:
@@ -264,8 +406,14 @@ def extract_by_rule(text: str) -> List[Dict[str, Any]]:
       【命令】 display vlan vlan-id                     标签 + 命令
       display ospf [ process-id ] peer [ verbose ]      「命令格式」段的语法行
       ```display ip routing-table [ verbose ]```        代码块
-    同一命令多次出现只留一条（保留样例回显最长的），按命令串排序 —— 结果确定。
+    同一完整语法多次出现只留一条（保留样例回显最长的），按命令串排序。
     """
+    structured = extract_by_command_blocks(text)
+    if structured:
+        # 命令块是厂商手册的正式定义。继续扫全文会把示例命令、字段说明和
+        # “1. display ... statistics 命令显示信息描述表”一类标题误收入库。
+        return structured
+
     found: Dict[str, Dict[str, Any]] = {}
     lines = text.replace("\r\n", "\n").split("\n")
     for idx, line in enumerate(lines):
@@ -275,11 +423,11 @@ def extract_by_rule(text: str) -> List[Dict[str, Any]]:
         m = SYNTAX_LINE_RE.match(body)
         if not m:
             continue
-        syntax = _clean(m.group(1))
-        parsed = split_syntax(_mark_bare_params(syntax))
-        cmd = parsed["base"]
-        if not _is_read_only(cmd) or len(cmd.split()) < 2:
+        syntax = _mark_bare_params(_clean(m.group(1)))
+        entry = _entry(syntax)
+        if not entry:
             continue
+        cmd = entry["command"]
         # 命令行之后连续的非空行当作样例回显（示例行才有；语法行后面通常是说明）
         sample: List[str] = []
         if line.strip().startswith("<") or line.strip().startswith("["):
@@ -300,29 +448,22 @@ def extract_by_rule(text: str) -> List[Dict[str, Any]]:
                 purpose = LINE_PREFIX_RE.sub("", prev, count=1).strip()[:120]
                 break
             k -= 1
-        prev_entry = found.get(_key(cmd))
+        identity = _key(syntax)
+        prev_entry = found.get(identity)
         if prev_entry:
-            # 已有：样例更长的替换；语法更完整（含参数）的补上
+            # 同一语法重复出现时保留更完整的样例。
             if len("\n".join(sample)) > len(prev_entry["sample"]):
                 prev_entry["sample"] = "\n".join(sample)
-            if len(syntax) > len(prev_entry["syntax"]) and parsed["required"] and not prev_entry["required"]:
-                prev_entry.update(syntax=syntax, required=parsed["required"],
-                                  params=sorted(set(parsed["required"])))
             continue
-        found[_key(cmd)] = {
-            "command": cmd,
-            "syntax": syntax,
-            "required": parsed["required"],
-            "purpose": purpose,
-            "keywords": sorted(set(t for t in cmd.split() if t not in READ_VERBS)),
-            "params": sorted(set(parsed["required"])),
-            "sample": "\n".join(sample),
-            "read_only": True,
-        }
+        entry["purpose"] = purpose
+        entry["sample"] = "\n".join(sample)
+        found[identity] = entry
     for c in extract_by_inline(text):
-        if _key(c["command"]) not in found:   # 裸命令行带样例回显，优先
-            found[_key(c["command"])] = c
-    return [found[k] for k in sorted(found)]
+        identity = _key(c["syntax"])
+        if identity not in found:   # 裸命令行带样例回显，优先
+            found[identity] = c
+    return sorted(found.values(), key=lambda item: (
+        _key(item["command"]), _key(item["syntax"])))
 
 
 AI_SCHEMA: Dict[str, Any] = {
@@ -366,19 +507,19 @@ def extract_by_ai(text: str) -> Dict[str, Any]:
         return {"ok": False, "commands": [], "error": res["error"]}
     out: List[Dict[str, Any]] = []
     for c in res["data"].get("commands", []):
-        cmd = _clean(str(c.get("command", "")))
-        if not _is_read_only(cmd):
+        entry = _entry(str(c.get("command", "")))
+        if not entry:
             continue
-        out.append({
-            "command": cmd,
-            "syntax": str(c.get("command", "")),
-            "required": [],
-            "purpose": str(c.get("purpose", ""))[:200],
-            "keywords": sorted({str(k).lower() for k in c.get("keywords", []) if k}),
-            "params": sorted({str(p) for p in c.get("params", []) if p}),
-            "sample": "",
-            "read_only": True,
-        })
-    uniq = {_key(c["command"]): c for c in out}
-    return {"ok": True, "commands": [uniq[k] for k in sorted(uniq)],
+        entry["purpose"] = str(c.get("purpose", ""))[:200]
+        entry["keywords"] = sorted(
+            set(entry["keywords"]) |
+            {str(k).lower() for k in c.get("keywords", []) if k})
+        entry["params"] = sorted(
+            set(entry["params"]) |
+            {str(p) for p in c.get("params", []) if p})
+        out.append(entry)
+    uniq = {_key(c["syntax"]): c for c in out}
+    return {"ok": True, "commands": sorted(
+                uniq.values(), key=lambda item: (
+                    _key(item["command"]), _key(item["syntax"]))),
             "cached": res.get("cached", False), "error": ""}

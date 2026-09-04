@@ -43,8 +43,8 @@ def calibrate(body: CalibrateIn) -> Dict[str, Any]:
     if not targets:
         raise HTTPException(400, "没有可用设备")
     blocked = device_service.unsupported_map()
-    cmds_all = [c["command"] for c in kb.list_commands(enabled_only=True)
-                if not (c.get("required") or [])]
+    cmds_all = sorted({c["command"] for c in kb.list_commands(enabled_only=True)
+                       if kb.runnable_command(c)})
     out, total = [], 0
     for name in targets:
         cmds = [c for c in cmds_all if c not in blocked.get(name, set())]

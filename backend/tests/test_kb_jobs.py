@@ -2,7 +2,7 @@
 import os
 import time
 
-from app.core.db import query_one
+from app.core.db import execute, query, query_one
 from app.modules.kb import jobs, service
 
 
@@ -41,3 +41,59 @@ def test_batch_job_persists_and_dedups(tmp_path):
     for d in service.list_docs():
         if d["name"] in ("one.md", "dup.md"):
             service.delete_doc(d["id"])
+
+
+def test_same_command_prefix_keeps_syntax_variants_and_stale_doc_reindexes():
+    raw = ("| command | description |\n|---|---|\n"
+           "| `show variant <peer> received-routes` | received |\n"
+           "| `show variant <peer> advertised-routes` | advertised |\n").encode()
+    first = service.import_doc("variant.md", raw, "auto")
+    assert first["found"] == 2 and first["added"] == 2
+    assert query_one(
+        "SELECT COUNT(*) n FROM kb_command WHERE doc_id=?", (first["doc_id"],))["n"] == 2
+
+    disabled = query_one(
+        "SELECT id, syntax FROM kb_command WHERE doc_id=? ORDER BY id LIMIT 1",
+        (first["doc_id"],))
+    execute("UPDATE kb_command SET enabled=0 WHERE id=?", (disabled["id"],))
+    execute("UPDATE kb_doc SET parser_version='' WHERE id=?", (first["doc_id"],))
+    second = service.import_doc("variant.md", raw, "auto")
+    assert second["reindexed"] is True
+    assert second["found"] == 2 and second["added"] == 2
+    assert query_one(
+        "SELECT enabled FROM kb_command WHERE doc_id=? AND syntax=?",
+        (first["doc_id"], disabled["syntax"]))["enabled"] == 0
+    service.delete_doc(first["doc_id"])
+
+
+def test_reindex_failure_rolls_back_the_whole_command_catalog():
+    raw = (
+        "show atomic-rollback one\n"
+        "show atomic-rollback two\n").encode()
+    first = service.import_doc("atomic.md", raw, "rule")
+    execute("UPDATE kb_command SET enabled=0 WHERE doc_id=?", (first["doc_id"],))
+    execute("UPDATE kb_doc SET parser_version='' WHERE id=?", (first["doc_id"],))
+    before = query(
+        "SELECT id, command, syntax, enabled FROM kb_command"
+        " WHERE doc_id=? ORDER BY id", (first["doc_id"],))
+
+    original = service.importer.extract_by_rule
+    commands = original(raw.decode())
+    broken = [dict(command) for command in commands]
+    broken[-1].pop("purpose")
+    service.importer.extract_by_rule = lambda _text: broken
+    try:
+        try:
+            service.import_doc("atomic.md", raw, "rule")
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("broken reindex unexpectedly succeeded")
+    finally:
+        service.importer.extract_by_rule = original
+
+    after = query(
+        "SELECT id, command, syntax, enabled FROM kb_command"
+        " WHERE doc_id=? ORDER BY id", (first["doc_id"],))
+    assert after == before
+    service.delete_doc(first["doc_id"])

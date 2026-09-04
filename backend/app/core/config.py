@@ -19,7 +19,7 @@ for _d in (DATA_DIR, UPLOAD_DIR):
 # ── 参与诊断指纹的版本锚 ────────────────────────────────────────────────
 NORMALIZE_VERSION = "NORM-1.0.0"   # 归一化规则版本（决定快照怎么算）
 PROMPT_VERSION = "PROMPT-1.0.0"    # 提示词模板版本（决定送给 AI 的字节）
-PLAN_VERSION = "PLAN-1.0.0"        # 采集编排版本
+PLAN_VERSION = "PLAN-1.1.0"        # 采集编排版本（完整 CLI syntax 闭集匹配）
 
 DEFAULT_MODEL = "claude-opus-5"
 

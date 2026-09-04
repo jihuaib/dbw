@@ -11,6 +11,7 @@ settings.bak.json
 
 # 环境与构建产物
 .venv/
+backend/wheelhouse/
 __pycache__/
 *.pyc
 .pytest_cache/

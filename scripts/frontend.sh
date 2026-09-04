@@ -5,13 +5,22 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIDF="$ROOT/frontend/.frontend.pid"
 LOG="$ROOT/frontend/.frontend.log"
 
-# Vite 6 需要 Node ≥ 18；优先用 nvm 里最新的 22
-if [ -d "$HOME/.nvm/versions/node" ]; then
-  LATEST="$(ls -d "$HOME"/.nvm/versions/node/v2[2-9]* 2>/dev/null | sort -V | tail -1)"
-  [ -n "$LATEST" ] && export PATH="$LATEST/bin:$PATH"
-fi
+ensure_runtime() {
+  command -v node >/dev/null 2>&1 || { echo "未找到 Node.js（需要 16.20.2 或更高版本）"; exit 1; }
+  node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit(major > 16 || (major === 16 && (minor > 20 || (minor === 20 && patch >= 2))) ? 0 : 1)' || {
+    echo "Node.js 版本过低：$(node --version)，需要 16.20.2 或更高版本"
+    exit 1
+  }
+  command -v npm >/dev/null 2>&1 || { echo "未找到 npm（需要 8.19.0 或更高版本）"; exit 1; }
+  NPM_VERSION="$(npm --version)"
+  node -e 'const [major, minor] = process.argv[1].split(".").map(Number); process.exit(major > 8 || (major === 8 && minor >= 19) ? 0 : 1)' "$NPM_VERSION" || {
+    echo "npm 版本过低：$NPM_VERSION，需要 8.19.0 或更高版本"
+    exit 1
+  }
+}
 
 ensure_deps() {
+  ensure_runtime
   [ -d "$ROOT/frontend/node_modules" ] || ( cd "$ROOT/frontend" && npm install --no-audit --no-fund )
 }
 
