@@ -4,9 +4,11 @@
 #   prod  生产模式：构建前端后只起后台，单端口 :8099 对外提供页面 + API
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 case "${1:-up}" in
-  prod)   "$ROOT/scripts/frontend.sh" build && "$ROOT/scripts/backend.sh" restart
+  prod)   "$ROOT/scripts/frontend.sh" build || exit $?
+          "$ROOT/scripts/backend.sh" restart || exit $?
           echo; echo "生产模式：浏览器打开 http://<本机IP>:${DETOPS_PORT:-8099}" ;;
-  up)     "$ROOT/scripts/backend.sh" start && "$ROOT/scripts/frontend.sh" start
+  up)     "$ROOT/scripts/backend.sh" start || exit $?
+          "$ROOT/scripts/frontend.sh" start || exit $?
           echo; echo "打开 http://127.0.0.1:5178  （实验环境: ./scripts/lab.sh up）" ;;
   down)   "$ROOT/scripts/frontend.sh" stop; "$ROOT/scripts/backend.sh" stop ;;
   status) "$ROOT/scripts/backend.sh" status; "$ROOT/scripts/frontend.sh" status ;;

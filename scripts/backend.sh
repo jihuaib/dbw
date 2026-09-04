@@ -17,7 +17,11 @@ ensure_venv() {
   local stamp="$ROOT/.venv/.requirements.stamp"
   if [ ! -f "$stamp" ] || [ "$ROOT/backend/requirements.txt" -nt "$stamp" ]; then
     echo "安装/更新后端依赖…"
-    "$ROOT/.venv/bin/pip" install -q -r "$ROOT/backend/requirements.txt" && touch "$stamp"
+    if ! "$PY" -m pip install -q -r "$ROOT/backend/requirements.txt"; then
+      echo "后端依赖安装失败；请先修复上方 pip 网络或证书错误。" >&2
+      return 1
+    fi
+    touch "$stamp"
   fi
 }
 

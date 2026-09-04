@@ -27,6 +27,24 @@ NN_IMAGE_EXPLICIT="${NN_IMAGE:-}"
 IMG="${NN_IMAGE:-netnexus:${NN_VERSION}-${NN_ARCH}}"
 DEVS="nn-spine1 nn-leaf1 nn-leaf2 nn-leaf3"
 
+# Keep the lab networks away from Docker's commonly auto-assigned 172.18.0.0/16
+# range. Each subnet can still be overridden when the local network requires it.
+NN_MGMT_SUBNET="${NN_MGMT_SUBNET:-172.30.240.0/24}"
+NN_S1L1_SUBNET="${NN_S1L1_SUBNET:-172.30.241.0/24}"
+NN_S1L2_SUBNET="${NN_S1L2_SUBNET:-172.30.242.0/24}"
+NN_S1L3_SUBNET="${NN_S1L3_SUBNET:-172.30.243.0/24}"
+
+ensure_network() {
+  local name="$1" subnet="$2" current
+  if docker network inspect "$name" >/dev/null 2>&1; then
+    current="$(docker network inspect "$name" --format '{{(index .IPAM.Config 0).Subnet}}')"
+    if [ "$current" = "$subnet" ]; then return; fi
+    echo "Recreating Docker network $name: $current -> $subnet"
+    docker network rm "$name" >/dev/null
+  fi
+  docker network create --subnet "$subnet" "$name" >/dev/null
+}
+
 ensure_image() {
   # 指定了镜像（NN_IMAGE 环境变量或 up 的第二个参数）：必须本地存在，不做任何猜测与下载
   if [ -n "$NN_IMAGE_EXPLICIT" ]; then
@@ -60,8 +78,10 @@ case "${1:-up}" in
 up)
   ensure_image
   docker rm -f $DEVS >/dev/null 2>&1 || true
-  docker network create nn-mgmt >/dev/null 2>&1 || true
-  for i in 1 2 3; do docker network create nn-s1l$i >/dev/null 2>&1 || true; done
+  ensure_network nn-mgmt "$NN_MGMT_SUBNET"
+  ensure_network nn-s1l1 "$NN_S1L1_SUBNET"
+  ensure_network nn-s1l2 "$NN_S1L2_SUBNET"
+  ensure_network nn-s1l3 "$NN_S1L3_SUBNET"
 
   # 先 create、把所有网络连好、再 start —— 镜像的启动脚本会为 GE 口自建 eth1..eth8，
   # 若容器先跑起来，随后的 network connect 给 veth 改名 eth1 时会撞「file exists」（机器越快越容易撞）。

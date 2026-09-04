@@ -486,6 +486,7 @@ function Ensure-BackendDependencies {
             Write-Host "Installing/updating backend dependencies from offline wheelhouse: $wheelhousePath"
             $installArgs = @(
                 '-m', 'pip', 'install', '--disable-pip-version-check',
+                '--isolated', '--no-cache-dir', '--only-binary=:all:',
                 '--no-index', '--find-links', $wheelhousePath,
                 '-r', $RequirementsPath
             )

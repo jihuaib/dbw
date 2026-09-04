@@ -272,26 +272,25 @@ Windows 原生脚本只启动应用本身；`scripts/lab.sh` 的容器网络实�
 
 #### 后端依赖离线安装
 
-如果 Windows 无法访问 PyPI，可在能联网的 Linux 上为当前 Windows Python 3.11 x64 下载
-预编译 wheels：
+可靠方式是在一台能联网、同为 Windows x64 + CPython 3.11 的机器上准备 wheelhouse。
+`pysmi==0.3.4` 没有官方 wheel，需要先构建一次：
 
-```bash
-mkdir -p backend/wheelhouse
-python3 -m pip download \
-  --dest backend/wheelhouse \
-  --only-binary=:all: \
-  --platform win_amd64 \
-  --python-version 311 \
-  --implementation cp \
-  --abi cp311 \
-  -r backend/requirements.txt \
-  colorama
+```powershell
+New-Item -ItemType Directory -Force backend\wheelhouse | Out-Null
+py -3.11 -m pip wheel --no-deps --no-binary=pysmi `
+  --wheel-dir backend\wheelhouse "pysmi==0.3.4"
+py -3.11 -m pip download `
+  --dest backend\wheelhouse `
+  --only-binary=:all: `
+  --find-links backend\wheelhouse `
+  -r backend\requirements.txt
 ```
 
-如果 Linux 和 Windows 使用同一份目录（例如 WSL），下载完成后直接回到 Windows 执行
-`\.\scripts\start.cmd`；否则将整个 `backend/wheelhouse` 目录复制到 Windows 工程的相同
-位置。启动脚本检测到该目录后会自动使用 `--no-index` 离线安装。也可以把离线包放在其它
-目录，并通过 `$env:DETOPS_WHEELHOUSE = 'D:\dbw-wheels'` 指定。
+将整个 `backend\wheelhouse` 目录复制到离线 Windows 工程的相同位置，然后执行
+`.\scripts\start.cmd`。启动脚本检测到该目录后会自动使用 `--no-index` 离线安装。
+也可以把离线包放在其它目录，并通过
+`$env:DETOPS_WHEELHOUSE = 'D:\dbw-wheels'` 指定。Linux 交叉下载不会正确处理所有
+Windows 环境标记（例如 `uvloop` / `colorama`），不建议作为正式离线包来源。
 
 ### Linux
 
